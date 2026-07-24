@@ -75,6 +75,16 @@ On first launch, the script auto-creates a virtual environment, installs Python 
 
 ---
 
+## Transcript Setup Files
+
+If you are following the video workflow, start with:
+
+- `TRANSCRIPT_SETUP.md` for the step-by-step setup distilled from the transcript
+- `agents.mmd` for the shared coordination rules
+- `templates/prd.template.md`
+- `templates/backend.template.md`
+- `templates/ui-spec.template.md`
+
 ## How it works
 
 ```
