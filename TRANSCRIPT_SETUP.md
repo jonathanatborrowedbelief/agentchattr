@@ -21,9 +21,13 @@ This repo already ships most of the workflow the transcript describes. The missi
    - Use `config.local.toml` for any local API-based agents you want to add.
 7. Create the planning files the transcript calls out.
    - `agents.mmd`
-   - PRD template
-   - backend template
-   - UI spec template
+   - `Claude.md`
+   - `Codex.md`
+   - `Gemini.md`
+   - `PRD.md`
+   - `backend.md`
+   - `ui-spec.md`
+   - the matching template files in `templates/`
 8. Start with planning before implementation.
    - Put the idea in a planning session.
    - Let the planner frame the work.
@@ -45,6 +49,8 @@ This repo already ships most of the workflow the transcript describes. The missi
 - `config.local.toml.example` for local API agents.
 - `session_templates/planning.json` for the plan / challenge / synthesize flow.
 - `session_templates/code-review.json`, `session_templates/design-critique.json`, and `session_templates/debate.json` for other multi-agent workflows.
+- `Claude.md`, `Codex.md`, and `Gemini.md` for model-specific behavior.
+- `PRD.md`, `backend.md`, and `ui-spec.md` for the live planning docs.
 
 ## Recommended operating order
 
@@ -52,8 +58,7 @@ This repo already ships most of the workflow the transcript describes. The missi
 2. Bring up the agents you want to use.
 3. Open `http://localhost:8300`.
 4. Create or choose the planning session.
-5. Fill in `agents.mmd` and the templates.
+5. Fill in `agents.mmd`, the per-model files, and the planning docs.
 6. Review the plan.
 7. Implement.
 8. Review again.
-

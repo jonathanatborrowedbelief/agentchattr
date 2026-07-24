@@ -4,10 +4,9 @@ Use this file as the shared source of truth for coordinated agent work.
 
 ## Roles
 
-- Planner: frame the goal, constraints, and sequence of work.
-- Challenger: look for gaps, risks, conflicts, and missing edge cases.
-- Builder: implement the agreed changes only.
-- Reviewer: verify the result against the plan and the repo state.
+- Claude: planner, orchestrator, challenger, synthesizer, and final reviewer.
+- Codex: builder and implementation owner.
+- Gemini: UI designer and visual systems owner.
 
 ## Rules
 
@@ -18,12 +17,13 @@ Use this file as the shared source of truth for coordinated agent work.
 - Use the planner/challenger/synthesiser flow before implementation on complex work.
 - Stop when the loop guard is reached and wait for human input.
 - Treat this file as the coordination anchor for the whole repo.
+- The model-specific instruction files are `Claude.md`, `Codex.md`, and `Gemini.md`; each agent should read its own file plus this file.
 
 ## Channel suggestions
 
-- `frontend` for UI work.
-- `backend` for server, data, and integration work.
 - `planning` for the PRD and synthesis pass.
+- `frontend` for UI work and visual review.
+- `backend` for server, data, and integration work.
 
 ## Definition of done
 
@@ -31,4 +31,3 @@ Use this file as the shared source of truth for coordinated agent work.
 - The risks are called out.
 - The implementation matches the approved plan.
 - The final review passes.
-

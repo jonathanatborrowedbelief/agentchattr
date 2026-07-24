@@ -81,6 +81,12 @@ If you are following the video workflow, start with:
 
 - `TRANSCRIPT_SETUP.md` for the step-by-step setup distilled from the transcript
 - `agents.mmd` for the shared coordination rules
+- `Claude.md` for Claude planning/orchestration instructions
+- `Codex.md` for Codex implementation instructions
+- `Gemini.md` for Gemini UI/design instructions
+- `PRD.md` for the live planning doc
+- `backend.md` for backend implementation notes
+- `ui-spec.md` for UI design notes
 - `templates/prd.template.md`
 - `templates/backend.template.md`
 - `templates/ui-spec.template.md`
