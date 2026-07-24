@@ -9,19 +9,19 @@ data_dir = "./data"
 
 [agents.claude]
 command = "claude"
-cwd = ".."
+cwd = "../Codex"
 color = "#da7756"
 label = "Claude"
 
 [agents.codex]
 command = "codex"
-cwd = ".."
+cwd = "../Codex"
 color = "#10a37f"
 label = "Codex"
 
 [agents.gemini]
 command = "gemini"
-cwd = ".."
+cwd = "../Codex"
 color = "#4285f4"
 label = "Gemini"
 

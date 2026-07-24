@@ -15,6 +15,7 @@
 - Populate the model-specific files and planning docs with your exact project rules and prompts.
 - Add any local API agents you want in `config.local.toml`.
 - Open the UI and launch the workflow from `localhost:8300`.
+- The agents are now pointed at `/Users/jonathan/Documents/Codex` as their working directory.
 
 ## Blockers
 - None for the transcript setup and local bootstrap.
