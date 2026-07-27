@@ -1,0 +1,51 @@
+{
+  "id": "team-up-v2",
+  "name": "Permanent Team Up v2",
+  "description": "Five stable specialist identities execute one goal through alignment, discovery, build, integration, and review.",
+  "roles": ["lead", "video", "scout", "builder", "integrator"],
+  "default_cast": {
+    "lead": "claude-lead",
+    "video": "gemini-video",
+    "scout": "codex-luna",
+    "builder": "codex-terra",
+    "integrator": "codex-sol"
+  },
+  "phases": [
+    {
+      "name": "Align + Plan",
+      "participants": ["lead"],
+      "prompt": "Restate the goal, non-goals, done criteria, project path, and assignments. If any conflict exists, halt and resolve it in chat before continuing.",
+      "is_output": false
+    },
+    {
+      "name": "Video Triage",
+      "participants": ["video"],
+      "prompt": "Analyze native video when present and post relevant evidence. If no media is present, post a one-line no-media handoff.",
+      "is_output": false
+    },
+    {
+      "name": "Scout",
+      "participants": ["scout"],
+      "prompt": "Perform bounded read-only discovery for the assigned scope. Post commands, paths, findings, and evidence for the builder.",
+      "is_output": false
+    },
+    {
+      "name": "Build",
+      "participants": ["builder"],
+      "prompt": "Implement only the assigned scope. Run focused tests and post changed files, commands, results, and blockers for integration.",
+      "is_output": false
+    },
+    {
+      "name": "Integrate + Smoke",
+      "participants": ["integrator"],
+      "prompt": "Integrate the scoped work, run broad checks and smoke tests, and fix only in-scope failures. Post commands, artifacts, and results.",
+      "is_output": false
+    },
+    {
+      "name": "Review + Done",
+      "participants": ["lead"],
+      "prompt": "Audit the result against the goal, non-goals, and done criteria. Post final evidence or a concrete blocker. Do not claim completion without proof.",
+      "is_output": true
+    }
+  ]
+}

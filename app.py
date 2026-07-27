@@ -2395,7 +2395,12 @@ async def start_session(request: Request):
     if not cast:
         online = registry.get_active_names() if registry else []
         roles = tmpl.get("roles", [])
-        cast = _auto_cast(roles, online, started_by)
+        cast = _auto_cast(
+            roles,
+            online,
+            started_by,
+            default_cast=tmpl.get("default_cast", {}),
+        )
         if not cast:
             return JSONResponse(
                 {"error": "not enough agents online to fill all roles"},
@@ -2500,19 +2505,39 @@ async def delete_session_template(template_id: str):
     return JSONResponse({"ok": True, "template_id": template_id})
 
 
-def _auto_cast(roles: list[str], online_agents: list[str], started_by: str) -> dict:
+def _auto_cast(
+    roles: list[str],
+    online_agents: list[str],
+    started_by: str,
+    default_cast: dict[str, str] | None = None,
+) -> dict:
     """Auto-assign roles to available agents. Returns empty dict if not enough agents."""
     cast = {}
-    available = list(online_agents)
+    used = set()
+    preferences = default_cast or {}
 
+    # Reserve online preferred identities before filling any gaps.
     for role in roles:
-        if not available:
-            # Reuse agents if we run out (one agent, multiple roles)
-            available = list(online_agents)
-        if not available:
-            return {}
-        agent = available.pop(0)
-        cast[role] = agent
+        preferred = preferences.get(role)
+        if preferred in online_agents and preferred not in used:
+            cast[role] = preferred
+            used.add(preferred)
+
+    available = [agent for agent in online_agents if agent not in used]
+    for role in roles:
+        if role not in cast and available:
+            agent = available.pop(0)
+            cast[role] = agent
+            used.add(agent)
+
+    if not online_agents:
+        return {}
+
+    reuse_index = 0
+    for role in roles:
+        if role not in cast:
+            cast[role] = online_agents[reuse_index % len(online_agents)]
+            reuse_index += 1
 
     return cast
 

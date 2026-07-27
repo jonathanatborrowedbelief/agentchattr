@@ -333,13 +333,35 @@ function _getAvailableAgents() {
         .map(([name]) => name);
 }
 
-function _autoCast(roles, agents) {
+function _autoCast(roles, agents, defaultCast = {}) {
     const cast = {};
-    let pool = [...agents];
+    const used = new Set();
+
     for (const role of roles) {
-        if (!pool.length) pool = [...agents];
-        if (!pool.length) return null;
-        cast[role] = pool.shift();
+        const preferred = defaultCast[role];
+        if (agents.includes(preferred) && !used.has(preferred)) {
+            cast[role] = preferred;
+            used.add(preferred);
+        }
+    }
+
+    const pool = agents.filter(agent => !used.has(agent));
+    for (const role of roles) {
+        if (!(role in cast) && pool.length) {
+            const agent = pool.shift();
+            cast[role] = agent;
+            used.add(agent);
+        }
+    }
+
+    if (!agents.length) return null;
+
+    let reuseIndex = 0;
+    for (const role of roles) {
+        if (!(role in cast)) {
+            cast[role] = agents[reuseIndex % agents.length];
+            reuseIndex += 1;
+        }
     }
     return cast;
 }
@@ -472,7 +494,7 @@ function showCastPreview(templateId) {
     if (!tmpl) return;
 
     const agents = _getAvailableAgents();
-    const cast = _autoCast(tmpl.roles || [], agents);
+    const cast = _autoCast(tmpl.roles || [], agents, tmpl.default_cast || {});
 
     // All possible assignees: agents + "user" (self) + "none" (skip)
     const assignees = [...agents, window.username];
@@ -648,7 +670,7 @@ function runDraft(msgId) {
 
 function showDraftCastPreview(tmpl, draftMsgId) {
     const agents = _getAvailableAgents();
-    const cast = _autoCast(tmpl.roles || [], agents);
+    const cast = _autoCast(tmpl.roles || [], agents, tmpl.default_cast || {});
     const assignees = [...agents, window.username];
 
     let existing = document.getElementById('session-launcher-modal');

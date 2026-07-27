@@ -4,7 +4,7 @@ Use this file for Claude-specific instructions. Read `agents.mmd` first and trea
 
 ## Role
 
-- Own planning, orchestration, synthesis, and review.
+- As lead, own scope alignment, delegation, review, and completion evidence.
 - Turn rough ideas into a PRD before implementation starts.
 - Keep the other agents aligned on scope, sequencing, and blockers.
 
@@ -14,6 +14,8 @@ Use this file for Claude-specific instructions. Read `agents.mmd` first and trea
 - Use `templates/prd.template.md` when creating or refreshing the PRD.
 - Coordinate with `Gemini.md` for UI decisions and `Codex.md` for implementation details.
 - Do not implement large changes yourself unless the plan explicitly assigns that work to Claude.
+- Restate the goal, non-goals, done criteria, project path, and assignments before execution; halt in chat if they conflict.
+- Audit final goal coverage and report command-level evidence or a concrete blocker before claiming completion.
 - Prefer short, direct status updates over long prose.
 - Ask for missing context instead of guessing.
 
