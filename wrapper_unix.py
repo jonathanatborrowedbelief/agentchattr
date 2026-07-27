@@ -102,18 +102,12 @@ def run_agent(
         [shlex.quote(command)] + [shlex.quote(a) for a in extra_args]
     )
 
-    # Build env(1) prefix for the command INSIDE the tmux session.
-    # subprocess.run(env=...) only affects the tmux client binary — the
-    # session shell inherits from the tmux server instead.  Use env(1)
-    # to set (-u to unset, VAR=val to inject) vars in the actual session.
+    # Build an env(1) prefix only for unsetting variables. Values injected
+    # into the session use tmux's -e flag below so secrets never enter the
+    # shell command string.
     env_parts = []
     if strip_env:
         env_parts.extend(f"-u {shlex.quote(v)}" for v in strip_env)
-    if inject_env:
-        env_parts.extend(
-            f"{shlex.quote(k)}={shlex.quote(v)}"
-            for k, v in inject_env.items()
-        )
     if env_parts:
         agent_cmd = f"env {' '.join(env_parts)} {agent_cmd}"
 
@@ -138,11 +132,11 @@ def run_agent(
             )
 
             # Create tmux session running the agent CLI
-            result = subprocess.run(
-                ["tmux", "new-session", "-d", "-s", session_name,
-                 "-c", abs_cwd, agent_cmd],
-                env=env,
-            )
+            tmux_command = ["tmux", "new-session", "-d", "-s", session_name, "-c", abs_cwd]
+            for key, value in (inject_env or {}).items():
+                tmux_command.extend(["-e", f"{key}={value}"])
+            tmux_command.append(agent_cmd)
+            result = subprocess.run(tmux_command, env=env)
             if result.returncode != 0:
                 print(f"  Error: failed to create tmux session (exit {result.returncode})")
                 break

@@ -13,17 +13,59 @@ cwd = "../Codex"
 color = "#da7756"
 label = "Claude"
 
+[agents.claude-lead]
+provider = "claude"
+command = "claude"
+cwd = "~/Documents/Codex"
+label = "Claude Lead"
+role = "Lead"
+launch_args = ["--model", "opus", "--effort", "high"]
+
 [agents.codex]
 command = "codex"
 cwd = "../Codex"
 color = "#10a37f"
 label = "Codex"
 
+[agents.codex-sol]
+provider = "codex"
+command = "codex"
+cwd = "~/Documents/Codex"
+label = "Codex Sol"
+role = "Integrator"
+launch_args = ["--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=high"]
+
+[agents.codex-terra]
+provider = "codex"
+command = "codex"
+cwd = "~/Documents/Codex"
+label = "Codex Terra"
+role = "Builder"
+launch_args = ["--model", "gpt-5.6-terra", "-c", "model_reasoning_effort=high"]
+
+[agents.codex-luna]
+provider = "codex"
+command = "codex"
+cwd = "~/Documents/Codex"
+label = "Codex Luna"
+role = "Scout"
+launch_args = ["--model", "gpt-5.6-luna", "-c", "model_reasoning_effort=medium"]
+
 [agents.gemini]
 command = "gemini"
 cwd = "../Codex"
 color = "#4285f4"
 label = "Gemini"
+
+[agents.gemini-video]
+provider = "gemini"
+command = "gemini"
+cwd = "~/Documents/Codex"
+label = "Gemini Video"
+role = "Video"
+launch_args = ["--model", "gemini-2.5-pro"]
+env_file = "~/Workspace/AG_Shared/.env.master"
+env_keys = ["GEMINI_API_KEY"]
 
 [agents.kimi]
 command = "kimi"
@@ -59,7 +101,7 @@ temperature = 1.0
 [routing]
 # "none" = only route on explicit @mention. "all" = route to all agents by default.
 default = "none"
-max_agent_hops = 4
+max_agent_hops = 12
 
 [mcp]
 http_port = 8200

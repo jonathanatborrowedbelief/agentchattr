@@ -152,6 +152,62 @@ _BUILTIN_DEFAULTS: dict[str, dict] = {
 _VALID_INJECT_MODES = {"settings_file", "env", "flag", "proxy_flag", "env_content"}
 
 
+def _load_selected_env(env_file: str, keys: list[str], environ: dict[str, str]) -> dict[str, str]:
+    """Load only requested, non-empty environment values without logging them."""
+    if not isinstance(keys, list) or not all(isinstance(key, str) and key for key in keys):
+        raise ValueError("env_keys must be a list of non-empty strings")
+
+    path = Path(os.path.expandvars(env_file)).expanduser()
+    parsed: dict[str, str] = {}
+    try:
+        lines = path.read_text("utf-8").splitlines()
+    except OSError as exc:
+        raise ValueError(f"Unable to read environment file: {path}") from exc
+
+    requested = set(keys)
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, separator, value = line.partition("=")
+        if separator and key in requested:
+            parsed[key] = value.strip()
+
+    loaded: dict[str, str] = {}
+    missing: list[str] = []
+    for key in keys:
+        inherited = environ.get(key, "")
+        value = inherited if isinstance(inherited, str) and inherited.strip() else parsed.get(key, "")
+        if not isinstance(value, str) or not value.strip():
+            missing.append(key)
+            continue
+        loaded[key] = value
+
+    if missing:
+        raise ValueError(f"Missing required environment value(s): {', '.join(missing)}")
+    return loaded
+
+
+def _resolve_provider(agent: str, agent_cfg: dict) -> str:
+    """Return the provider used for runtime behavior for an agent identity."""
+    return str(agent_cfg.get("provider") or agent)
+
+
+def _merge_launch_args(agent_cfg: dict, runtime_args: list[str]) -> list[str]:
+    """Put configured CLI arguments before runtime-added arguments."""
+    configured = agent_cfg.get("launch_args", [])
+    if not isinstance(configured, list) or not all(isinstance(value, str) for value in configured):
+        raise ValueError("launch_args must be a list of strings")
+    return [*configured, *runtime_args]
+
+
+def _resolve_runtime_cwd(cwd: str) -> str:
+    """Expand configured working directories before passing them to a provider."""
+    return str(Path(os.path.expandvars(cwd)).expanduser().resolve())
+
+
 def _resolve_mcp_inject(agent: str, agent_cfg: dict) -> dict:
     """Resolve MCP injection config: explicit agent_cfg > built-in defaults > None."""
     inject_mode = agent_cfg.get("mcp_inject")
@@ -313,13 +369,14 @@ def _build_provider_launch(
     because subprocess.run(env=...) only affects the tmux client binary.
     On Windows they are simply merged into the Popen env dict.
     """
-    inject_cfg = _resolve_mcp_inject(agent, agent_cfg)
+    provider = _resolve_provider(agent, agent_cfg)
+    inject_cfg = _resolve_mcp_inject(provider, agent_cfg)
     mcp_args, inject_env, settings_path = _apply_mcp_inject(
         inject_cfg, instance_name, data_dir, proxy_url,
         token=token, mcp_cfg=mcp_cfg, project_dir=project_dir,
     )
 
-    launch_args = [*mcp_args, *extra_args]
+    launch_args = _merge_launch_args(agent_cfg, [*mcp_args, *extra_args])
     launch_env = dict(env)
 
     return launch_args, launch_env, inject_env, settings_path
@@ -337,6 +394,22 @@ def _register_instance(server_port: int, base: str, label: str | None = None) ->
     )
     with urllib.request.urlopen(reg_req, timeout=5) as reg_resp:
         return json.loads(reg_resp.read())
+
+
+def _assign_role(server_port: int, agent_name: str, role: str) -> None:
+    """Persist a configured role for the registered runtime identity."""
+    import urllib.parse
+    import urllib.request
+
+    body = json.dumps({"role": role}).encode()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server_port}/api/roles/{urllib.parse.quote(agent_name, safe='')}",
+        method="POST",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=5):
+        pass
 
 
 def _auth_headers(token: str, *, include_json: bool = False) -> dict[str, str]:
@@ -526,11 +599,13 @@ def main():
     parser.add_argument("agent", choices=agent_names, help=f"Agent to wrap ({', '.join(agent_names)})")
     parser.add_argument("--no-restart", action="store_true", help="Do not restart on exit")
     parser.add_argument("--label", type=str, default=None, help="Custom display label")
+    parser.add_argument("--cwd", type=str, default=None, help="Override the agent working directory")
+    parser.add_argument("--role", type=str, default=None, help="Override the agent role")
     args, extra = parser.parse_known_args()
 
     agent = args.agent
     agent_cfg = config.get("agents", {}).get(agent, {})
-    cwd = agent_cfg.get("cwd", ".")
+    cwd = _resolve_runtime_cwd(args.cwd or agent_cfg.get("cwd", "."))
     command = agent_cfg.get("command", agent)
     data_dir = ROOT / config.get("server", {}).get("data_dir", "./data")
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -548,13 +623,21 @@ def main():
     assigned_token = registration["token"]
     print(f"  Registered as: {assigned_name} (slot {registration.get('slot', '?')})")
 
+    assigned_role = args.role if args.role is not None else agent_cfg.get("role", "")
+    if assigned_role:
+        try:
+            _assign_role(server_port, assigned_name, str(assigned_role))
+        except Exception:
+            print("  Warning: registered agent but could not set its role.")
+
     proxy = None
     proxy_url = None
 
     # Resolve MCP injection mode to determine if a proxy is needed.
     # Direct-connect modes (settings_file, env, flag) don't need a proxy.
     # proxy_flag mode needs a proxy. No mcp_inject = proxy fallback.
-    inject_cfg = _resolve_mcp_inject(agent, agent_cfg)
+    provider = _resolve_provider(agent, agent_cfg)
+    inject_cfg = _resolve_mcp_inject(provider, agent_cfg)
     inject_mode = inject_cfg.get("mcp_inject", "")
     if inject_mode and inject_mode not in _VALID_INJECT_MODES:
         print(f"  Error: unknown mcp_inject mode '{inject_mode}' for agent '{agent}'.")
@@ -608,7 +691,7 @@ def main():
             _apply_mcp_inject(
                 inject_cfg, instance_name, data_dir, proxy_url,
                 token=new_token, mcp_cfg=mcp_cfg,
-                project_dir=(ROOT / cwd).resolve(),
+                project_dir=Path(cwd),
             )
         except Exception:
             pass
@@ -654,11 +737,11 @@ def main():
         sys.exit(1)
     command = resolved
 
-    project_dir = (ROOT / cwd).resolve()
+    project_dir = Path(cwd)
 
     # Gemini: ensure the project directory is trusted so MCPs are allowed.
     # Gemini blocks ALL MCPs for untrusted folders — even system-settings ones.
-    if agent == "gemini" or inject_cfg.get("mcp_inject") == "env":
+    if provider == "gemini" or inject_cfg.get("mcp_inject") == "env":
         _ensure_gemini_folder_trusted(project_dir)
 
     launch_args, env, inject_env, mcp_settings_path = _build_provider_launch(
@@ -673,6 +756,20 @@ def main():
         mcp_cfg=mcp_cfg,
         project_dir=project_dir,
     )
+
+    if "env_file" in agent_cfg or "env_keys" in agent_cfg:
+        try:
+            selected_env = _load_selected_env(
+                env_file=agent_cfg.get("env_file", ""),
+                keys=agent_cfg.get("env_keys", []),
+                environ=env,
+            )
+        except ValueError as exc:
+            print(f"  Error: {exc}")
+            sys.exit(1)
+        for key, value in selected_env.items():
+            if not env.get(key, "").strip():
+                inject_env[key] = value
 
     print(f"  === {assigned_name.capitalize()} Chat Wrapper ===")
     if not needs_proxy:
@@ -706,6 +803,8 @@ def main():
                     try:
                         replacement = _register_instance(server_port, agent, args.label)
                         set_runtime_identity(replacement["name"], replacement["token"])
+                        if assigned_role:
+                            _assign_role(server_port, replacement["name"], str(assigned_role))
                         _notify_recovery(data_dir, replacement["name"])
                     except Exception:
                         pass
