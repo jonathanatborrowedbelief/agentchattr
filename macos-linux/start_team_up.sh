@@ -37,7 +37,7 @@ wait_for_server() {
 }
 
 if ! port_is_listening; then
-    nohup "$PYTHON" "$REPO_DIR/run.py" >"$LOG_DIR/server.redacted.log" 2>&1 &
+    nohup "$PYTHON" "$REPO_DIR/run.py" >/dev/null 2>&1 &
     printf '%s\n' "$!" >"$PID_DIR/server.pid"
 fi
 

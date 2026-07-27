@@ -194,5 +194,56 @@ class TeamUpRuntimeTests(unittest.TestCase):
                     except ProcessLookupError:
                         pass
 
+    def test_launcher_does_not_persist_raw_server_output(self):
+        source_script = Path(__file__).parents[1] / "macos-linux" / "start_team_up.sh"
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            repo = root / "repo"
+            script_dir = repo / "macos-linux"
+            script_dir.mkdir(parents=True)
+            script = script_dir / "start_team_up.sh"
+            shutil.copy2(source_script, script)
+            (repo / "requirements.txt").write_text("", encoding="utf-8")
+            python = repo / ".venv" / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            python.chmod(0o755)
+            project = root / "project"
+            project.mkdir()
+
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            listen_state = root / "listening"
+            (fake_bin / "lsof").write_text(
+                "#!/bin/sh\n"
+                "if [ -f \"$TEAM_UP_LISTEN_STATE\" ]; then exit 0; fi\n"
+                ": > \"$TEAM_UP_LISTEN_STATE\"\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "tmux").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (fake_bin / "nohup").write_text(
+                "#!/bin/sh\nprintf '%s\\n' raw-server-output\n",
+                encoding="utf-8",
+            )
+            for executable in fake_bin.iterdir():
+                executable.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "TEAM_UP_LISTEN_STATE": str(listen_state),
+            }
+            subprocess.run(
+                ["sh", str(script), str(project)],
+                check=True,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertFalse((repo / "logs" / "team-up" / "server.redacted.log").exists())
+
 if __name__ == "__main__":
     unittest.main()
