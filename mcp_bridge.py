@@ -26,6 +26,7 @@ registry = None       # set by run.py — RuntimeRegistry instance
 config = None         # set by run.py — full config.toml dict
 router = None         # set by run.py — Router instance
 agents = None         # set by run.py — AgentManager instance
+activity_store = None # set by run.py — AgentActivityStore instance
 _presence: dict[str, float] = {}
 _activity: dict[str, bool] = {}   # True = screen changed on last poll
 _activity_ts: dict[str, float] = {}  # timestamp of last active=True heartbeat
@@ -254,6 +255,8 @@ def chat_send(
             return f"Error: job #{job_id} not found."
         with _presence_lock:
             _presence[sender] = time.time()
+        if activity_store:
+            activity_store.mark_done(sender, "response_posted")
 
         # Route @mentions in job messages to trigger other agents
         if router and agents:
@@ -321,6 +324,8 @@ def chat_send(
     _update_cursor(sender, [msg], channel)
     with _presence_lock:
         _presence[sender] = time.time()
+    if activity_store:
+        activity_store.mark_done(sender, "response_posted")
     return f"Sent (id={msg['id']})"
 
 
@@ -486,6 +491,8 @@ def migrate_identity(old_name: str, new_name: str):
     if old_name in _roles:
         _roles[new_name] = _roles.pop(old_name)
         _save_roles()
+    if activity_store:
+        activity_store.migrate_identity(old_name, new_name)
     _save_cursors()
 
 
@@ -500,6 +507,8 @@ def purge_identity(name: str):
     if name in _roles:
         del _roles[name]
         _save_roles()
+    if activity_store:
+        activity_store.purge_identity(name)
     _save_cursors()
 
 
@@ -550,6 +559,8 @@ def chat_read(
     sender, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=False)
     if err:
         return err
+    if sender and activity_store:
+        activity_store.mark_tool(sender, "chat_read")
 
     # Job-scoped read: return job metadata plus the thread messages
     if job_id and jobs:
@@ -682,6 +693,27 @@ def chat_who() -> str:
     """Check who's currently online in agentchattr."""
     online = _get_online()
     return f"Online: {', '.join(online)}" if online else "Nobody online."
+
+
+def chat_activity(
+    sender: str,
+    state: str,
+    reason: str,
+    ctx: Context | None = None,
+) -> str:
+    """Report a fixed-caption lifecycle transition for the authenticated agent."""
+    instance = _authenticated_instance(ctx)
+    if not instance:
+        return "Error: authenticated agent session required."
+    if state not in ("WORKING", "BLOCKED", "DONE"):
+        return "Error: state is not allowed."
+    if not activity_store:
+        return "Error: activity telemetry is unavailable."
+    try:
+        activity_store.mark_activity(instance["name"], state, reason)
+    except ValueError:
+        return "Error: reason is not allowed for state."
+    return "Activity recorded."
 
 
 def _touch_presence(name: str):
@@ -887,7 +919,8 @@ def chat_summary(
 
 
 _ALL_TOOLS = [
-    chat_send, chat_read, chat_resync, chat_join, chat_who, chat_rules, chat_decision,
+    chat_send, chat_read, chat_resync, chat_join, chat_who, chat_activity,
+    chat_rules, chat_decision,
     chat_channels, chat_set_hat, chat_claim, chat_summary, chat_propose_job,
 ]
 
@@ -920,4 +953,3 @@ def run_http_server():
 def run_sse_server():
     """Block — run SSE MCP in a background thread."""
     mcp_sse.run(transport="sse")
-

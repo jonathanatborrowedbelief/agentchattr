@@ -889,13 +889,6 @@ def main():
         last_active = None
         last_report_time = 0
         REPORT_INTERVAL = 3  # re-send state every 3s while active (keeps server lease fresh)
-        # Debug log for activity reporting
-        import os as _act_os
-        _act_log_path = _act_os.path.join(
-            _act_os.path.dirname(_act_os.path.abspath(__file__)),
-            f"activity_report_{assigned_name}.log",
-        )
-        _act_log = open(_act_log_path, "w")
         while True:
             time.sleep(1)
             if not _activity_checker:
@@ -923,21 +916,11 @@ def main():
                         headers=_auth_headers(current_token, include_json=True),
                     )
                     resp = urllib.request.urlopen(req, timeout=5)
-                    resp_code = resp.getcode()
+                    resp.getcode()
                     last_active = active
                     last_report_time = now
-                    import time as _t2
-                    _act_log.write(
-                        f"[{_t2.strftime('%H:%M:%S')}] SENT active={active} "
-                        f"to={current_name} status={resp_code}\n"
-                    )
-                    _act_log.flush()
-            except Exception as exc:
-                import time as _t2
-                _act_log.write(
-                    f"[{_t2.strftime('%H:%M:%S')}] ERROR: {exc}\n"
-                )
-                _act_log.flush()
+            except Exception:
+                pass
 
     threading.Thread(target=_activity_monitor, daemon=True).start()
 

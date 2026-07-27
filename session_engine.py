@@ -20,11 +20,19 @@ class SessionEngine:
     agents via the AgentTrigger system.
     """
 
-    def __init__(self, session_store, message_store, agent_trigger, registry=None):
+    def __init__(
+        self,
+        session_store,
+        message_store,
+        agent_trigger,
+        registry=None,
+        activity_store=None,
+    ):
         self._store = session_store
         self._messages = message_store
         self._trigger = agent_trigger
         self._registry = registry
+        self._activity = activity_store
         self._lock = threading.Lock()
 
         # Hook into message stream
@@ -80,6 +88,9 @@ class SessionEngine:
         """End a session early."""
         session = self._store.interrupt(session_id, reason)
         if session:
+            expected_agent = self._get_expected_agent(session)
+            if expected_agent and self._activity:
+                self._activity.mark_blocked(expected_agent, "session_paused")
             log.info("Session %d interrupted: %s", session_id, reason)
         return session
 
@@ -155,6 +166,8 @@ class SessionEngine:
         # Human spoke but it's not their turn — pause if an agent is expected
         if not sender_is_agent and sender != expected_agent and self._is_agent(expected_agent):
             self._store.pause(session["id"])
+            if self._activity:
+                self._activity.mark_blocked(expected_agent, "session_paused")
             log.info("Session %d paused: human interruption by %s", session["id"], sender)
             return
 
@@ -246,6 +259,8 @@ class SessionEngine:
         if not agent:
             log.warning("Session %d: no agent cast for role '%s'", session["id"], role)
             self._store.interrupt(session["id"], f"no agent for role '{role}'")
+            if self._activity:
+                self._activity.mark_blocked(role, "missing_cast")
             return
 
         if not self._is_agent(agent):
@@ -255,6 +270,11 @@ class SessionEngine:
 
         # Mark waiting
         self._store.set_waiting(session["id"], agent)
+        if self._activity:
+            self._activity.mark_queued(
+                agent,
+                channel=session.get("channel", "general"),
+            )
 
         # Assemble the prompt
         prompt = self._assemble_prompt(session, tmpl, phase, role)

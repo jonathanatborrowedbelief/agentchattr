@@ -24,6 +24,7 @@ from agents import AgentTrigger
 from registry import RuntimeRegistry
 from session_store import SessionStore, validate_session_template
 from session_engine import SessionEngine
+from agent_activity import AgentActivityStore
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ agents: AgentTrigger | None = None
 registry: RuntimeRegistry | None = None
 session_store: SessionStore | None = None
 session_engine: SessionEngine | None = None
+activity_store: AgentActivityStore | None = None
 config: dict = {}
 ws_clients: set[WebSocket] = set()
 
@@ -230,7 +232,8 @@ def _install_security_middleware(token: str, cfg: dict):
 
 
 def configure(cfg: dict, session_token: str = ""):
-    global store, rules, summaries, jobs, schedules, router, agents, registry, session_store, session_engine, config
+    global store, rules, summaries, jobs, schedules, router, agents, registry
+    global session_store, session_engine, activity_store, config
     config = cfg
     # --- Security: store the session token and install middleware ---
     _install_security_middleware(session_token, cfg)
@@ -286,7 +289,8 @@ def configure(cfg: dict, session_token: str = ""):
         default_mention=cfg.get("routing", {}).get("default", "none"),
         max_hops=max_hops,
     )
-    agents = AgentTrigger(registry, data_dir=data_dir)
+    activity_store = AgentActivityStore()
+    agents = AgentTrigger(registry, data_dir=data_dir, activity_store=activity_store)
 
     # Sessions
     ROOT = Path(__file__).parent
@@ -294,7 +298,13 @@ def configure(cfg: dict, session_token: str = ""):
         str(Path(data_dir) / "session_runs.json"),
         templates_dir=str(ROOT / "session_templates"),
     )
-    session_engine = SessionEngine(session_store, store, agents, registry)
+    session_engine = SessionEngine(
+        session_store,
+        store,
+        agents,
+        registry,
+        activity_store=activity_store,
+    )
     session_store.on_change(_on_session_change)
 
     # Bridge: when ANY message is added to store (including via MCP),
@@ -2222,6 +2232,8 @@ async def heartbeat(agent_name: str, request: Request):
             active_val = bool(body["active"])
             was_active = mcp_bridge._activity.get(current_name, False)
             mcp_bridge.set_active(current_name, active_val)
+            if activity_store:
+                activity_store.mark_terminal(current_name, active_val)
             _activity_changed = was_active != active_val
     except Exception:
         pass  # No body = plain heartbeat
