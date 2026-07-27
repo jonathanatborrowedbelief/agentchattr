@@ -10,6 +10,7 @@ let autoScroll = true;
 let reconnectTimer = null;
 let username = 'user';
 let agentConfig = {};  // { name: { color, label } } — registered instances (used for pills)
+let agentActivity = {};  // { name: normalized activity payload } — lifecycle state and safe captions
 let baseColors = {};   // { name: { color, label } } — base agent colors (for message coloring)
 let todos = {};  // { msg_id: "todo" | "done" }
 let rules = [];  // array of rule objects from server
@@ -1132,13 +1133,21 @@ function buildStatusPills() {
     const container = document.getElementById('agent-status');
     container.innerHTML = '';
     for (const [name, cfg] of Object.entries(agentConfig)) {
+        const activity = agentActivity[name] || ActivityStatus.normalize({ state: 'IDLE' });
         const pill = document.createElement('div');
         pill.className = 'status-pill';
         if (cfg.state === 'pending') pill.classList.add('pending');
         pill.id = `status-${name}`;
-        pill.title = `@${name}`;  // Tooltip: canonical name for manual @-typing
         pill.style.setProperty('--agent-color', colorOverrides[name] || cfg.color || '#4ade80');
-        pill.innerHTML = `<span class="status-dot"></span><span class="status-label">${escapeHtml(cfg.label || name)}</span>`;
+        const dot = document.createElement('span');
+        dot.className = 'status-dot';
+        const label = document.createElement('span');
+        label.className = 'status-label';
+        label.textContent = cfg.label || name;
+        const state = document.createElement('span');
+        state.className = 'status-state';
+        pill.append(dot, label, state);
+        renderPillActivity(pill, name, activity);
         // Left-click to toggle pill popover (rename + role + color)
         pill.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -1148,7 +1157,7 @@ function buildStatusPills() {
             const mode = cfg.state === 'pending' ? 'pending' : 'rename';
             showPillPopover(pill, {
                 name, label: cfg.label || name, color: cfg.color || '#888',
-                base: cfg.base || '', mode,
+                base: cfg.base || '', mode, activity: agentActivity[name],
             });
         });
         container.appendChild(pill);
@@ -1350,6 +1359,17 @@ function showPillPopover(pillEl, opts) {
             </div>`;
         })()}
     `;
+
+    const activitySection = document.createElement('div');
+    activitySection.className = 'pill-popover-section pill-activity-section';
+    const activityLabel = document.createElement('label');
+    activityLabel.className = 'pill-popover-label';
+    activityLabel.textContent = 'Latest activity';
+    const activityEvents = document.createElement('div');
+    activityEvents.className = 'pill-activity-events';
+    activitySection.append(activityLabel, activityEvents);
+    ActivityStatus.renderRecentEvents(document, activityEvents, opts.activity?.recentEvents || []);
+    popover.appendChild(activitySection);
 
     const inputEl = popover.querySelector('.pill-popover-input');
     const confirmBtn = popover.querySelector('.pill-popover-confirm');
@@ -1683,31 +1703,48 @@ const _ROLE_EMOJI = {
     'chaos gremlin': '😈', 'red team': '🛡️', 'roast': '🔥', 'hype': '🎉',
 };
 
+function renderPillActivity(pill, name, activity) {
+    const displayState = activity.displayState;
+    const stateClass = displayState.toLowerCase();
+    pill.classList.remove(
+        'available', 'working', 'offline',
+        'state-waiting', 'state-working', 'state-blocked', 'state-done', 'state-idle', 'state-offline',
+    );
+    pill.classList.add(`state-${stateClass}`);
+    if (!pill.classList.contains('pending')) {
+        pill.classList.add(stateClass === 'offline' ? 'offline' : stateClass === 'working' ? 'working' : 'available');
+    }
+
+    const stateLabel = pill.querySelector('.status-state');
+    if (stateLabel) {
+        stateLabel.className = `status-state state-${stateClass}`;
+        stateLabel.textContent = displayState;
+    }
+
+    const role = _agentRoles[name] || '';
+    const latest = activity.event || activity.recentEvents.at(-1);
+    const tooltipParts = [`@${name}`, role ? `Role: ${role}` : '', `State: ${displayState}`, ActivityStatus.eventCaption(latest)];
+    pill.title = tooltipParts.filter(Boolean).join(' · ');
+}
+
 function updateStatus(data) {
     for (const [name, info] of Object.entries(data)) {
         if (name === 'paused') continue;
-        const pill = document.getElementById(`status-${name}`);
+        const agentName = name.toLowerCase();
+        const activity = ActivityStatus.normalize(info);
+        agentActivity[agentName] = activity;
+        const pill = document.getElementById(`status-${name}`) || document.getElementById(`status-${agentName}`);
         if (!pill) continue;
-
-        pill.classList.remove('available', 'working', 'offline');
-        // Pending pills keep their pending animation (set in buildStatusPills)
-        if (!pill.classList.contains('pending')) {
-            if (info.busy && info.available) {
-                pill.classList.add('working');
-            } else if (info.available) {
-                pill.classList.add('available');
-            } else {
-                pill.classList.add('offline');
-            }
-        }
+        renderPillActivity(pill, agentName, activity);
 
         // Keep agent color in sync
         if (info.color) pill.style.setProperty('--agent-color', info.color);
 
         // Track role (displayed on bubbles, not on pill)
         if (info.role !== undefined) {
-            _agentRoles[name] = info.role;
-            _syncBubbleRolePills(name);
+            _agentRoles[agentName] = info.role;
+            _syncBubbleRolePills(agentName);
+            renderPillActivity(pill, agentName, activity);
         }
     }
 }

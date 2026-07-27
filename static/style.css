@@ -289,6 +289,19 @@ header h1 {
     flex-shrink: 0;
 }
 
+.status-state {
+    color: var(--text-dim);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+}
+.status-state.state-waiting { color: var(--warning); }
+.status-state.state-working { color: var(--accent); }
+.status-state.state-blocked { color: var(--error-color); }
+.status-state.state-done { color: var(--success); }
+.status-state.state-idle { color: var(--info); }
+.status-state.state-offline { color: var(--text-dim); }
+
 .status-dot {
     width: 8px;
     height: 8px;
@@ -299,6 +312,12 @@ header h1 {
 
 .status-pill.available .status-dot { background: var(--online); }
 .status-pill.offline .status-dot { background: #555; }
+.status-pill.state-waiting .status-dot { background: var(--warning); }
+.status-pill.state-working .status-dot { background: var(--accent); }
+.status-pill.state-blocked .status-dot { background: var(--error-color); }
+.status-pill.state-done .status-dot { background: var(--success); }
+.status-pill.state-idle .status-dot { background: var(--info); }
+.status-pill.state-offline .status-dot { background: #555; }
 
 .status-pill.offline {
     opacity: 0.4;
@@ -3199,6 +3218,22 @@ pre:hover .code-copy-btn { opacity: 1; }
     margin-bottom: var(--space-md, 12px);
 }
 .pill-popover-section:last-child { margin-bottom: 0; }
+.pill-activity-section {
+    border-top: 1px solid var(--border-subtle);
+    padding-top: var(--space-md, 12px);
+}
+.pill-activity-events { max-height: 180px; overflow-y: auto; }
+.activity-events { display: flex; flex-direction: column; gap: 5px; }
+.activity-event {
+    display: grid;
+    grid-template-columns: 58px minmax(0, 1fr);
+    gap: 8px;
+    font-size: 11px;
+    line-height: 1.35;
+}
+.activity-event-time { color: var(--text-dim); }
+.activity-event-caption { color: var(--text); overflow-wrap: anywhere; }
+.activity-events-empty { color: var(--text-dim); font-size: 11px; }
 .pill-popover-label {
     display: block;
     font-size: 11px;
