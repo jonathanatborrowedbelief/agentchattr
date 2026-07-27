@@ -270,11 +270,6 @@ class SessionEngine:
 
         # Mark waiting
         self._store.set_waiting(session["id"], agent)
-        if self._activity:
-            self._activity.mark_queued(
-                agent,
-                channel=session.get("channel", "general"),
-            )
 
         # Assemble the prompt
         prompt = self._assemble_prompt(session, tmpl, phase, role)

@@ -2221,22 +2221,31 @@ async def heartbeat(agent_name: str, request: Request):
     if registry and registry.is_agent_family(agent_name) and not auth_inst:
         return JSONResponse({"error": "authenticated agent session required"}, status_code=403)
 
+    body = {}
+    try:
+        parsed_body = await request.json()
+        if isinstance(parsed_body, dict):
+            body = parsed_body
+    except Exception:
+        pass  # No body = plain heartbeat
+    if "active" in body and not auth_inst:
+        return JSONResponse(
+            {"error": "authenticated agent session required for activity"},
+            status_code=403,
+        )
+
     current_name = auth_inst["name"] if auth_inst else agent_name
     with mcp_bridge._presence_lock:
         mcp_bridge._presence[current_name] = __import__("time").time()
     # Optional activity report from wrapper's terminal monitor
     _activity_changed = False
-    try:
-        body = await request.json()
-        if "active" in body:
-            active_val = bool(body["active"])
-            was_active = mcp_bridge._activity.get(current_name, False)
-            mcp_bridge.set_active(current_name, active_val)
-            if activity_store:
-                activity_store.mark_terminal(current_name, active_val)
-            _activity_changed = was_active != active_val
-    except Exception:
-        pass  # No body = plain heartbeat
+    if "active" in body:
+        active_val = bool(body["active"])
+        was_active = mcp_bridge._activity.get(current_name, False)
+        mcp_bridge.set_active(current_name, active_val)
+        if activity_store:
+            activity_store.mark_terminal(current_name, active_val)
+        _activity_changed = was_active != active_val
     # Immediately broadcast on activity state change (don't wait for background checker)
     if _activity_changed:
         await broadcast_status()

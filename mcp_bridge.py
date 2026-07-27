@@ -205,6 +205,7 @@ def chat_send(
       chat_send(sender="claude", message="Should I merge?", choices=["Yes", "No", "Show diff first"])
     For normal messages without choices, pass choices=[]:
       chat_send(sender="claude", message="Done.", choices=[])"""
+    activity_instance = _authenticated_instance(ctx)
     sender, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=True)
     if err:
         return err
@@ -255,8 +256,8 @@ def chat_send(
             return f"Error: job #{job_id} not found."
         with _presence_lock:
             _presence[sender] = time.time()
-        if activity_store:
-            activity_store.mark_done(sender, "response_posted")
+        if activity_store and activity_instance:
+            activity_store.mark_done(activity_instance["name"], "response_posted")
 
         # Route @mentions in job messages to trigger other agents
         if router and agents:
@@ -324,8 +325,8 @@ def chat_send(
     _update_cursor(sender, [msg], channel)
     with _presence_lock:
         _presence[sender] = time.time()
-    if activity_store:
-        activity_store.mark_done(sender, "response_posted")
+    if activity_store and activity_instance:
+        activity_store.mark_done(activity_instance["name"], "response_posted")
     return f"Sent (id={msg['id']})"
 
 
@@ -556,11 +557,12 @@ def chat_read(
     - Pass channel to filter by channel name (default: all channels).
     - Pass job_id to read a specific job. Job reads return a header entry first,
       including title and body, followed by the thread messages."""
+    activity_instance = _authenticated_instance(ctx)
     sender, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=False)
     if err:
         return err
-    if sender and activity_store:
-        activity_store.mark_tool(sender, "chat_read")
+    if activity_store and activity_instance:
+        activity_store.mark_tool(activity_instance["name"], "chat_read")
 
     # Job-scoped read: return job metadata plus the thread messages
     if job_id and jobs:

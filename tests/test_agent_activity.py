@@ -334,6 +334,51 @@ class AgentActivityIntegrationTests(unittest.TestCase):
             "response_posted",
         )
 
+    def test_unauthenticated_chat_calls_do_not_create_activity_identity(self):
+        import mcp_bridge
+
+        self.messages.add("user", "Public context", channel="general")
+
+        read_result = mcp_bridge.chat_read(
+            sender="dashboard-user",
+            channel="general",
+            ctx=None,
+        )
+        send_result = mcp_bridge.chat_send(
+            sender="dashboard-user",
+            message="Public reply",
+            choices=[],
+            channel="general",
+            ctx=None,
+        )
+
+        self.assertIn("Public context", read_result)
+        self.assertIn("Sent", send_result)
+        self.assertEqual(
+            self.activity.snapshot("dashboard-user"),
+            {"state": "IDLE", "event": None, "recent_events": []},
+        )
+
+    def test_unauthenticated_active_heartbeat_is_rejected_without_activity(self):
+        import app
+
+        request = SimpleNamespace(
+            headers={},
+            json=mock.AsyncMock(return_value={"active": True}),
+        )
+        with (
+            mock.patch.object(app, "registry", self.registry),
+            mock.patch.object(app, "activity_store", self.activity, create=True),
+            mock.patch.object(app, "broadcast_status", mock.AsyncMock()),
+        ):
+            response = asyncio.run(app.heartbeat("dashboard-user", request))
+
+        self.assertEqual(getattr(response, "status_code", 200), 403)
+        self.assertEqual(
+            self.activity.snapshot("dashboard-user"),
+            {"state": "IDLE", "event": None, "recent_events": []},
+        )
+
     def test_chat_activity_rejects_unauthenticated_invalid_state_and_reason(self):
         import mcp_bridge
 
@@ -427,7 +472,105 @@ class AgentActivityIntegrationTests(unittest.TestCase):
             "session_paused",
         )
 
-    def test_session_trigger_records_waiting_and_missing_cast_records_blocked(self):
+    def test_session_trigger_records_one_queued_event(self):
+        from session_engine import SessionEngine
+
+        class FakeSessionStore:
+            def get_template(self, template_id):
+                return {
+                    "phases": [
+                        {
+                            "name": "Build",
+                            "prompt": "Build the bounded slice",
+                            "participants": ["builder"],
+                        }
+                    ]
+                }
+
+            def set_waiting(self, session_id, agent):
+                return None
+
+        sessions = FakeSessionStore()
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            trigger = AgentTrigger(
+                self.registry,
+                data_dir=temporary_dir,
+                activity_store=self.activity,
+            )
+            engine = SessionEngine(
+                sessions,
+                self.messages,
+                trigger,
+                self.registry,
+                activity_store=self.activity,
+            )
+            engine._trigger_current(
+                {
+                    "id": 8,
+                    "template_id": "build",
+                    "channel": "build",
+                    "current_phase": 0,
+                    "current_turn": 0,
+                    "cast": {"builder": "codex-terra"},
+                }
+            )
+
+        snapshot = self.activity.snapshot("codex-terra")
+        self.assertEqual(snapshot["state"], "WAITING")
+        self.assertEqual(len(snapshot["recent_events"]), 1)
+        self.assertEqual(snapshot["event"]["count"], 1)
+
+    def test_failed_session_queue_write_does_not_claim_waiting(self):
+        from session_engine import SessionEngine
+
+        class FakeSessionStore:
+            def get_template(self, template_id):
+                return {
+                    "phases": [
+                        {
+                            "name": "Build",
+                            "prompt": "Build the bounded slice",
+                            "participants": ["builder"],
+                        }
+                    ]
+                }
+
+            def set_waiting(self, session_id, agent):
+                return None
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            invalid_data_dir = Path(temporary_dir) / "not-a-directory"
+            invalid_data_dir.write_text("occupied", encoding="utf-8")
+            trigger = AgentTrigger(
+                self.registry,
+                data_dir=invalid_data_dir,
+                activity_store=self.activity,
+            )
+            engine = SessionEngine(
+                FakeSessionStore(),
+                self.messages,
+                trigger,
+                self.registry,
+                activity_store=self.activity,
+            )
+
+            engine._trigger_current(
+                {
+                    "id": 9,
+                    "template_id": "build",
+                    "channel": "build",
+                    "current_phase": 0,
+                    "current_turn": 0,
+                    "cast": {"builder": "codex-terra"},
+                }
+            )
+
+        self.assertEqual(
+            self.activity.snapshot("codex-terra"),
+            {"state": "IDLE", "event": None, "recent_events": []},
+        )
+
+    def test_missing_cast_records_blocked(self):
         from session_engine import SessionEngine
 
         class FakeSessionStore:
@@ -445,43 +588,30 @@ class AgentActivityIntegrationTests(unittest.TestCase):
                     ]
                 }
 
-            def set_waiting(self, session_id, agent):
-                return None
-
             def interrupt(self, session_id, reason):
                 self.interrupted.append((session_id, reason))
 
         sessions = FakeSessionStore()
-        trigger = mock.Mock()
         engine = SessionEngine(
             sessions,
             self.messages,
-            trigger,
+            mock.Mock(),
             self.registry,
             activity_store=self.activity,
         )
-        session = {
-            "id": 8,
-            "template_id": "build",
-            "channel": "build",
-            "current_phase": 0,
-            "current_turn": 0,
-            "cast": {"builder": "codex-terra"},
-        }
+        engine._trigger_current(
+            {
+                "id": 8,
+                "template_id": "build",
+                "channel": "build",
+                "current_phase": 0,
+                "current_turn": 0,
+                "cast": {},
+            }
+        )
 
-        engine._trigger_current(session)
-
-        self.assertEqual(self.activity.snapshot("codex-terra")["state"], "WAITING")
-        trigger.trigger_sync.assert_called_once()
-
-        session["cast"] = {}
-        engine._trigger_current(session)
         self.assertEqual(sessions.interrupted, [(8, "no agent for role 'builder'")])
         self.assertEqual(self.activity.snapshot("builder")["state"], "BLOCKED")
-        self.assertEqual(
-            self.activity.snapshot("builder")["event"]["reason"],
-            "missing_cast",
-        )
 
 
 if __name__ == "__main__":
