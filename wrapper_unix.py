@@ -79,6 +79,15 @@ def get_activity_checker(session_name, trigger_flag=None):
     return check
 
 
+def _build_tmux_new_session_command(session_name, abs_cwd, agent_cmd, inject_env=None):
+    """Build a tmux command that injects environment values per session."""
+    tmux_command = ["tmux", "new-session", "-d", "-s", session_name, "-c", abs_cwd]
+    for key, value in (inject_env or {}).items():
+        tmux_command.extend(["-e", f"{key}={value}"])
+    tmux_command.append(agent_cmd)
+    return tmux_command
+
+
 def run_agent(
     command,
     extra_args,
@@ -132,10 +141,9 @@ def run_agent(
             )
 
             # Create tmux session running the agent CLI
-            tmux_command = ["tmux", "new-session", "-d", "-s", session_name, "-c", abs_cwd]
-            for key, value in (inject_env or {}).items():
-                tmux_command.extend(["-e", f"{key}={value}"])
-            tmux_command.append(agent_cmd)
+            tmux_command = _build_tmux_new_session_command(
+                session_name, abs_cwd, agent_cmd, inject_env,
+            )
             result = subprocess.run(tmux_command, env=env)
             if result.returncode != 0:
                 print(f"  Error: failed to create tmux session (exit {result.returncode})")

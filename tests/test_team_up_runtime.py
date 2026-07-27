@@ -1,4 +1,7 @@
 import os
+import shutil
+import signal
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -113,6 +116,83 @@ class TeamUpRuntimeTests(unittest.TestCase):
             server.server_close()
 
         self.assertEqual(requests, [("/api/roles/codex-sol", b'{"role": "Integrator"}')])
+
+    def test_selected_environment_reaches_tmux_for_inherited_values(self):
+        from wrapper import _merge_selected_session_env
+        from wrapper_unix import _build_tmux_new_session_command
+
+        session_env = _merge_selected_session_env(
+            {"MCP_SETTINGS": "settings-path"},
+            {"GEMINI_API_KEY": "inherited-for-test"},
+        )
+        command = _build_tmux_new_session_command(
+            "agentchattr-gemini-video",
+            "/tmp/project",
+            "gemini",
+            session_env,
+        )
+
+        self.assertIn("GEMINI_API_KEY=inherited-for-test", command)
+        self.assertIn("MCP_SETTINGS=settings-path", command)
+
+    def test_registration_retries_a_cold_server(self):
+        from wrapper import _register_instance_with_retry
+
+        with mock.patch("wrapper._register_instance", side_effect=[OSError(), OSError(), {"name": "codex-sol"}]) as register:
+            with mock.patch("wrapper.time.sleep") as sleep:
+                result = _register_instance_with_retry(8300, "codex-sol", attempts=3, retry_delay=0)
+
+        self.assertEqual(result, {"name": "codex-sol"})
+        self.assertEqual(register.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_launcher_skips_a_live_wrapper_pid_when_tmux_is_not_ready(self):
+        source_script = Path(__file__).parents[1] / "macos-linux" / "start_team_up.sh"
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            repo = root / "repo"
+            script_dir = repo / "macos-linux"
+            script_dir.mkdir(parents=True)
+            script = script_dir / "start_team_up.sh"
+            shutil.copy2(source_script, script)
+            (repo / "requirements.txt").write_text("", encoding="utf-8")
+            python = repo / ".venv" / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            python.chmod(0o755)
+            project = root / "project"
+            project.mkdir()
+
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            (fake_bin / "lsof").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (fake_bin / "tmux").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            (fake_bin / "nohup").write_text(
+                "#!/bin/sh\nexec sleep 30\n",
+                encoding="utf-8",
+            )
+            for executable in fake_bin.iterdir():
+                executable.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            }
+            started_pids: list[int] = []
+            try:
+                subprocess.run(["sh", str(script), str(project)], check=True, env=env, capture_output=True, text=True)
+                first_pids = {path.name: path.read_text("utf-8") for path in (repo / ".pids").glob("*.pid")}
+                started_pids = [int(pid) for pid in first_pids.values()]
+                subprocess.run(["sh", str(script), str(project)], check=True, env=env, capture_output=True, text=True)
+                second_pids = {path.name: path.read_text("utf-8") for path in (repo / ".pids").glob("*.pid")}
+                self.assertEqual(second_pids, first_pids)
+            finally:
+                for pid in started_pids:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
 
 if __name__ == "__main__":
     unittest.main()

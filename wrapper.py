@@ -208,6 +208,11 @@ def _resolve_runtime_cwd(cwd: str) -> str:
     return str(Path(os.path.expandvars(cwd)).expanduser().resolve())
 
 
+def _merge_selected_session_env(inject_env: dict[str, str], selected_env: dict[str, str]) -> dict[str, str]:
+    """Ensure requested credentials reach the provider's per-session environment."""
+    return {**inject_env, **selected_env}
+
+
 def _resolve_mcp_inject(agent: str, agent_cfg: dict) -> dict:
     """Resolve MCP injection config: explicit agent_cfg > built-in defaults > None."""
     inject_mode = agent_cfg.get("mcp_inject")
@@ -364,10 +369,9 @@ def _build_provider_launch(
 ) -> tuple[list[str], dict[str, str], dict[str, str], Path | None]:
     """Return provider-specific launch args/env/inject_env/settings_path.
 
-    inject_env: env vars that must propagate INTO the agent process.  On
-    Mac/Linux these are prefixed onto the tmux command via ``env VAR=val``
-    because subprocess.run(env=...) only affects the tmux client binary.
-    On Windows they are simply merged into the Popen env dict.
+    inject_env: environment variables that must propagate into the agent
+    process. On Mac/Linux they are passed with tmux's per-session ``-e`` flag;
+    on Windows they are merged into the Popen environment.
     """
     provider = _resolve_provider(agent, agent_cfg)
     inject_cfg = _resolve_mcp_inject(provider, agent_cfg)
@@ -394,6 +398,27 @@ def _register_instance(server_port: int, base: str, label: str | None = None) ->
     )
     with urllib.request.urlopen(reg_req, timeout=5) as reg_resp:
         return json.loads(reg_resp.read())
+
+
+def _register_instance_with_retry(
+    server_port: int,
+    base: str,
+    label: str | None = None,
+    *,
+    attempts: int = 12,
+    retry_delay: float = 0.5,
+) -> dict:
+    """Register after a bounded wait for a freshly started local server."""
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return _register_instance(server_port, base, label)
+        except Exception as exc:
+            last_error = exc
+            if attempt < attempts - 1:
+                time.sleep(retry_delay)
+    assert last_error is not None
+    raise last_error
 
 
 def _assign_role(server_port: int, agent_name: str, role: str) -> None:
@@ -613,7 +638,7 @@ def main():
     mcp_cfg = config.get("mcp", {})
 
     try:
-        registration = _register_instance(server_port, agent, args.label)
+        registration = _register_instance_with_retry(server_port, agent, args.label)
     except Exception as exc:
         print(f"  Registration failed ({exc}).")
         print("  Wrapper cannot continue without a registered identity.")
@@ -767,9 +792,7 @@ def main():
         except ValueError as exc:
             print(f"  Error: {exc}")
             sys.exit(1)
-        for key, value in selected_env.items():
-            if not env.get(key, "").strip():
-                inject_env[key] = value
+        inject_env = _merge_selected_session_env(inject_env, selected_env)
 
     print(f"  === {assigned_name.capitalize()} Chat Wrapper ===")
     if not needs_proxy:

@@ -24,10 +24,36 @@ port_is_listening() {
     lsof -nP -iTCP:8300 -sTCP:LISTEN >/dev/null 2>&1
 }
 
+wait_for_server() {
+    attempts=20
+    while [ "$attempts" -gt 0 ]; do
+        if port_is_listening; then
+            return 0
+        fi
+        attempts=$((attempts - 1))
+        sleep 1
+    done
+    return 1
+}
+
 if ! port_is_listening; then
     nohup "$PYTHON" "$REPO_DIR/run.py" >"$LOG_DIR/server.redacted.log" 2>&1 &
     printf '%s\n' "$!" >"$PID_DIR/server.pid"
 fi
+
+if ! wait_for_server; then
+    printf '%s\n' "Server is not ready yet; wrappers will use their bounded registration retry."
+fi
+
+pid_file_is_live() {
+    pid_file=$1
+    [ -r "$pid_file" ] || return 1
+    IFS= read -r wrapper_pid < "$pid_file" || return 1
+    case "$wrapper_pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$wrapper_pid" 2>/dev/null
+}
 
 start_wrapper() {
     identity=$1
@@ -38,6 +64,10 @@ start_wrapper() {
 
     if tmux has-session -t "$session" 2>/dev/null; then
         printf 'Skipping %s; tmux session %s already exists.\n' "$role" "$session"
+        return
+    fi
+    if pid_file_is_live "$pid_file"; then
+        printf 'Skipping %s; wrapper PID is still running.\n' "$role"
         return
     fi
 
