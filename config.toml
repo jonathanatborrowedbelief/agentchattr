@@ -19,7 +19,7 @@ command = "claude"
 cwd = "~/Documents/Codex"
 label = "Claude Lead"
 role = "Lead"
-launch_args = ["--model", "opus", "--effort", "high"]
+launch_args = ["--model", "opus", "--effort", "high", "--permission-mode", "auto"]
 instructions_file = "Claude.md"
 inject_delay = 1.0
 

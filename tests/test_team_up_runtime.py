@@ -36,6 +36,17 @@ class TeamUpRuntimeTests(unittest.TestCase):
             expected,
         )
         self.assertEqual(config["agents"]["claude-lead"].get("inject_delay"), 1.0)
+        self.assertEqual(
+            config["agents"]["claude-lead"].get("launch_args"),
+            [
+                "--model",
+                "opus",
+                "--effort",
+                "high",
+                "--permission-mode",
+                "auto",
+            ],
+        )
 
     def test_provider_alias_reuses_builtin_mcp_defaults(self):
         cfg = {"provider": "codex"}
