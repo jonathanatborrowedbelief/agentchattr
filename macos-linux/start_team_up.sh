@@ -12,6 +12,9 @@ VENV_DIR="$REPO_DIR/.venv"
 PYTHON="$VENV_DIR/bin/python"
 LOG_DIR="$REPO_DIR/logs/team-up"
 SERVER_SESSION="agentchattr-team-up-server"
+SERVER_WINDOW="server"
+SERVER_SESSION_TARGET="=$SERVER_SESSION"
+SERVER_WINDOW_TARGET="=$SERVER_SESSION:$SERVER_WINDOW"
 
 mkdir -p "$LOG_DIR"
 
@@ -36,24 +39,44 @@ wait_for_server() {
     return 1
 }
 
+tmux_pane_is_live() {
+    target=$1
+    pane_state=$(
+        tmux list-panes -t "$target" -F '#{pane_dead}' 2>/dev/null
+    ) || return 1
+    [ "$pane_state" = "0" ]
+}
+
+tmux_window_exists() {
+    target=$1
+    tmux list-panes -t "$target" -F '#{pane_id}' >/dev/null 2>&1
+}
+
 if ! port_is_listening; then
-    if ! tmux has-session -t "$SERVER_SESSION" 2>/dev/null; then
-        tmux new-session -d -s "$SERVER_SESSION" -c "$REPO_DIR" \
-            "exec '$PYTHON' '$REPO_DIR/run.py'"
+    if ! tmux_pane_is_live "$SERVER_WINDOW_TARGET"; then
+        if tmux has-session -t "$SERVER_SESSION_TARGET" 2>/dev/null; then
+            if tmux_window_exists "$SERVER_WINDOW_TARGET"; then
+                tmux kill-window -t "$SERVER_WINDOW_TARGET"
+            fi
+            tmux new-window -d -t "$SERVER_SESSION_TARGET" \
+                -n "$SERVER_WINDOW" -c "$REPO_DIR" \
+                "$PYTHON" "$REPO_DIR/run.py"
+        else
+            tmux new-session -d -s "$SERVER_SESSION" \
+                -n "$SERVER_WINDOW" -c "$REPO_DIR" \
+                "$PYTHON" "$REPO_DIR/run.py"
+        fi
     fi
 fi
 
 if ! wait_for_server; then
-    printf '%s\n' "Server is not ready yet; wrappers will use their bounded registration retry."
+    printf '%s\n' "Server failed to become ready; wrappers were not started." >&2
+    exit 1
 fi
 
 wrapper_owner_is_live() {
     owner_window=$1
-    owner_state=$(
-        tmux display-message -p \
-            -t "$SERVER_SESSION:$owner_window" '#{pane_dead}' 2>/dev/null
-    ) || return 1
-    [ "$owner_state" = "0" ]
+    tmux_pane_is_live "=$SERVER_SESSION:$owner_window"
 }
 
 start_wrapper() {
@@ -69,18 +92,18 @@ start_wrapper() {
         return
     fi
 
-    if tmux has-session -t "$session" 2>/dev/null; then
-        tmux kill-session -t "$session"
+    if tmux has-session -t "=$session" 2>/dev/null; then
+        tmux kill-session -t "=$session"
     fi
 
     printf '%s\n' "Wrapper started; runtime output is suppressed to protect credentials." >"$log_file"
     if [ "$identity" = "gemini-video" ] && [ -n "${TEAM_UP_GEMINI_MODEL:-}" ]; then
-        tmux new-window -d -t "$SERVER_SESSION" -n "$owner_window" \
+        tmux new-window -d -t "$SERVER_SESSION_TARGET" -n "$owner_window" \
             -c "$REPO_DIR" "$PYTHON" "$REPO_DIR/wrapper.py" "$identity" \
             --cwd "$PROJECT_DIR" --role "$role" \
             --model "$TEAM_UP_GEMINI_MODEL"
     else
-        tmux new-window -d -t "$SERVER_SESSION" -n "$owner_window" \
+        tmux new-window -d -t "$SERVER_SESSION_TARGET" -n "$owner_window" \
             -c "$REPO_DIR" "$PYTHON" "$REPO_DIR/wrapper.py" "$identity" \
             --cwd "$PROJECT_DIR" --role "$role"
     fi
@@ -93,8 +116,8 @@ start_wrapper "codex-terra" "Builder"
 start_wrapper "codex-luna" "Scout"
 
 printf '\nTeam Up: http://127.0.0.1:8300\n'
-printf '%s\n' "Lead:       agentchattr-claude-lead    tmux attach -t agentchattr-claude-lead"
-printf '%s\n' "Video:      agentchattr-gemini-video  tmux attach -t agentchattr-gemini-video"
-printf '%s\n' "Integrator: agentchattr-codex-sol     tmux attach -t agentchattr-codex-sol"
-printf '%s\n' "Builder:    agentchattr-codex-terra   tmux attach -t agentchattr-codex-terra"
-printf '%s\n' "Scout:      agentchattr-codex-luna    tmux attach -t agentchattr-codex-luna"
+printf '%s\n' "Lead:       agentchattr-claude-lead    tmux attach -t =agentchattr-claude-lead"
+printf '%s\n' "Video:      agentchattr-gemini-video  tmux attach -t =agentchattr-gemini-video"
+printf '%s\n' "Integrator: agentchattr-codex-sol     tmux attach -t =agentchattr-codex-sol"
+printf '%s\n' "Builder:    agentchattr-codex-terra   tmux attach -t =agentchattr-codex-terra"
+printf '%s\n' "Scout:      agentchattr-codex-luna    tmux attach -t =agentchattr-codex-luna"
