@@ -18,6 +18,16 @@ SERVER_WINDOW_TARGET="=$SERVER_SESSION:=$SERVER_WINDOW"
 
 mkdir -p "$LOG_DIR"
 
+# The launcher never consumes a credential value directly. Keep inherited or
+# tmux-global Gemini credentials out of the server and non-Gemini wrappers;
+# gemini-video receives its selected value later from wrapper.py.
+unset GEMINI_API_KEY
+tmux set-environment -gu GEMINI_API_KEY >/dev/null 2>&1 || true
+if tmux has-session -t "$SERVER_SESSION_TARGET" 2>/dev/null; then
+    tmux set-environment -u -t "$SERVER_SESSION_TARGET" GEMINI_API_KEY \
+        >/dev/null 2>&1 || true
+fi
+
 if [ ! -x "$PYTHON" ]; then
     python3 -m venv "$VENV_DIR"
     "$VENV_DIR/bin/pip" install -r "$REPO_DIR/requirements.txt"

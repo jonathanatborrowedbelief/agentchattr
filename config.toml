@@ -21,6 +21,7 @@ label = "Claude Lead"
 role = "Lead"
 launch_args = ["--model", "opus", "--effort", "high"]
 instructions_file = "Claude.md"
+inject_delay = 1.0
 
 [agents.codex]
 command = "codex"

@@ -153,7 +153,13 @@ _VALID_INJECT_MODES = {"settings_file", "env", "flag", "proxy_flag", "env_conten
 _MAX_ROLE_INSTRUCTIONS_BYTES = 16 * 1024
 
 
-def _load_selected_env(env_file: str, keys: list[str], environ: dict[str, str]) -> dict[str, str]:
+def _load_selected_env(
+    env_file: str,
+    keys: list[str],
+    environ: dict[str, str],
+    *,
+    allow_inherited_fallback: bool = True,
+) -> dict[str, str]:
     """Load only requested, non-empty environment values without logging them."""
     if not isinstance(keys, list) or not all(isinstance(key, str) and key for key in keys):
         raise ValueError("env_keys must be a list of non-empty strings")
@@ -163,13 +169,14 @@ def _load_selected_env(env_file: str, keys: list[str], environ: dict[str, str]) 
     try:
         lines = path.read_text("utf-8").splitlines()
     except OSError as exc:
-        inherited = {
-            key: value
-            for key in keys
-            if isinstance((value := environ.get(key, "")), str) and value.strip()
-        }
-        if len(inherited) == len(keys):
-            return inherited
+        if allow_inherited_fallback:
+            inherited = {
+                key: value
+                for key in keys
+                if isinstance((value := environ.get(key, "")), str) and value.strip()
+            }
+            if len(inherited) == len(keys):
+                return inherited
         raise ValueError(f"Unable to read environment file: {path}") from exc
 
     requested = set(keys)
@@ -188,11 +195,12 @@ def _load_selected_env(env_file: str, keys: list[str], environ: dict[str, str]) 
     for key in keys:
         inherited = environ.get(key, "")
         file_value = parsed.get(key, "")
-        value = (
-            file_value
-            if isinstance(file_value, str) and file_value.strip()
-            else inherited
-        )
+        value = file_value
+        if (
+            allow_inherited_fallback
+            and (not isinstance(value, str) or not value.strip())
+        ):
+            value = inherited
         if not isinstance(value, str) or not value.strip():
             missing.append(key)
             continue
@@ -208,6 +216,19 @@ def _select_env_file(configured: str, runtime_override: str | None) -> str:
     if runtime_override and runtime_override.strip():
         return runtime_override.strip()
     return configured
+
+
+def _configured_credential_keys(config: dict) -> set[str]:
+    """Return every provider credential key so unrelated parents can drop them."""
+    keys: set[str] = set()
+    for agent_cfg in config.get("agents", {}).values():
+        configured = agent_cfg.get("env_keys", [])
+        if not isinstance(configured, list):
+            raise ValueError("env_keys must be a list of non-empty strings")
+        if not all(isinstance(key, str) and key for key in configured):
+            raise ValueError("env_keys must be a list of non-empty strings")
+        keys.update(configured)
+    return keys
 
 
 def _resolve_provider(agent: str, agent_cfg: dict) -> str:
@@ -916,7 +937,16 @@ def _run_main(cleanup: _RegistrationCleanup):
     if queue_file.exists():
         queue_file.write_text("", "utf-8")
 
-    strip_vars = {"CLAUDECODE"} | set(agent_cfg.get("strip_env", []))
+    try:
+        credential_keys = _configured_credential_keys(config)
+    except ValueError as exc:
+        print(f"  Error: {exc}")
+        sys.exit(1)
+    strip_vars = (
+        {"CLAUDECODE"}
+        | set(agent_cfg.get("strip_env", []))
+        | credential_keys
+    )
     env = {k: v for k, v in os.environ.items() if k not in strip_vars}
 
     resolved = shutil.which(command)
@@ -954,7 +984,8 @@ def _run_main(cleanup: _RegistrationCleanup):
                     args.env_file,
                 ),
                 keys=agent_cfg.get("env_keys", []),
-                environ=env,
+                environ=os.environ,
+                allow_inherited_fallback=args.env_file is None,
             )
         except ValueError as exc:
             print(f"  Error: {exc}")

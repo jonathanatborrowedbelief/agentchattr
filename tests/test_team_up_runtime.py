@@ -35,6 +35,7 @@ class TeamUpRuntimeTests(unittest.TestCase):
             },
             expected,
         )
+        self.assertEqual(config["agents"]["claude-lead"].get("inject_delay"), 1.0)
 
     def test_provider_alias_reuses_builtin_mcp_defaults(self):
         cfg = {"provider": "codex"}
@@ -132,6 +133,38 @@ class TeamUpRuntimeTests(unittest.TestCase):
                 environ={"GEMINI_API_KEY": "inherited-fallback"},
             )
             self.assertEqual(fallback, {"GEMINI_API_KEY": "inherited-fallback"})
+
+            with self.assertRaisesRegex(ValueError, "Unable to read environment file"):
+                _load_selected_env(
+                    env_file=str(Path(temporary_dir) / "unavailable.env"),
+                    keys=["GEMINI_API_KEY"],
+                    environ={"GEMINI_API_KEY": "inherited-fallback"},
+                    allow_inherited_fallback=False,
+                )
+
+            with self.assertRaisesRegex(ValueError, "GEMINI_API_KEY"):
+                _load_selected_env(
+                    env_file=str(blank_file),
+                    keys=["GEMINI_API_KEY"],
+                    environ={"GEMINI_API_KEY": "inherited-fallback"},
+                    allow_inherited_fallback=False,
+                )
+
+    def test_configured_credential_keys_are_stripped_from_every_parent(self):
+        from wrapper import _configured_credential_keys
+
+        config = {
+            "agents": {
+                "claude-lead": {},
+                "gemini-video": {"env_keys": ["GEMINI_API_KEY"]},
+                "codex-sol": {"env_keys": ["CODEX_PRIVATE_KEY"]},
+            }
+        }
+
+        self.assertEqual(
+            _configured_credential_keys(config),
+            {"GEMINI_API_KEY", "CODEX_PRIVATE_KEY"},
+        )
 
     def test_runtime_cwd_expands_environment_and_home(self):
         from wrapper import _resolve_runtime_cwd
@@ -1047,6 +1080,7 @@ class TeamUpRuntimeTests(unittest.TestCase):
             env = {
                 **os.environ,
                 "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "GEMINI_API_KEY": "must-not-reach-tmux",
                 "TEAM_UP_GEMINI_MODEL": "gemini-2.5-flash",
                 "TEAM_UP_GEMINI_ENV_FILE": "/tmp/working-gemini.env",
                 "TEAM_UP_TMUX_LOG": str(tmux_log),
@@ -1089,6 +1123,9 @@ class TeamUpRuntimeTests(unittest.TestCase):
                     for invocation in other_invocations
                 )
             )
+            tmux_commands = tmux_log.read_text("utf-8").splitlines()
+            self.assertIn("set-environment -gu GEMINI_API_KEY", tmux_commands)
+            self.assertNotIn("must-not-reach-tmux", tmux_log.read_text("utf-8"))
 
     def test_server_startup_output_does_not_print_session_token(self):
         import app
