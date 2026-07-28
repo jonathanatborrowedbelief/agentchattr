@@ -68,6 +68,9 @@ or persisted by the launcher.
 - The temporary video fixture was removed after the smoke.
 - A clean relaunch verified autonomous `CLAUDE_AUTO_TRIGGER_OK` and
   `GEMINI_31_TRIGGER_OK` chatter responses without manual approval.
+- The final reliability relaunch passed the exact service, MCP-port, and
+  five-identity readiness gate, then verified `CLAUDE_FINAL_OK` and
+  `GEMINI_FINAL_OK`.
 
 ## Activity feed
 
@@ -79,15 +82,21 @@ or persisted by the launcher.
 
 ## Verification
 
-- Focused runtime/activity Python suite: 46/46 passed.
+- Focused runtime/session/activity Python suite: 58/58 passed.
 - Node activity-status suite: 8/8 passed.
-- Full Python discovery: 53/55 passed; the only two errors are pre-existing
+- Full Python discovery: 61/63 passed; the only two errors are pre-existing
   archive tests at `archive.py:355` because `MessageStore._save` does not exist.
 - Python compileall, JavaScript syntax checks, launcher shell syntax, and
   `git diff --check`: passed.
 - Provider versions: Claude Code `2.1.220`, Gemini CLI `0.52.0`, Codex CLI
   `0.144.6`.
-- Scoped credential and auto-mode reviews: PASS.
+- Session advancement is atomic against duplicate delayed messages.
+- Queue delivery is per-trigger and at-least-once across startup, restart, and
+  tmux injection failure; pending batches are never cleared on wrapper start.
+- The launcher requires the exact Team Up health marker, both ports 8300/8200,
+  and exactly the five stable identities before printing success.
+- Scoped credential, auto-mode, queue/reliability, and final repair reviews:
+  PASS.
 
 ## Remaining external constraints
 

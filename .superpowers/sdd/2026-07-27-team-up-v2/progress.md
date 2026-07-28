@@ -22,3 +22,5 @@ Task 5: complete — session 3 reached all six phases with exact five-role cast,
 Task 5 verification: 46/46 focused Python, 8/8 Node, full discovery 53/55 with only two pre-existing archive errors
 Final live repair: explicit credential overrides fail closed, configured credential keys are stripped from unrelated providers and tmux globals, and Claude lead launches in auto mode (commits 6f4eb34..a6ac88a; scoped reviews PASS)
 Final relaunch: exact five identities and six owner windows stable; Claude and Gemini trigger smokes passed with Gemini CLI 0.52 operational fallback gemini-3.1-flash-lite
+Final branch repair: duplicate delayed messages cannot skip phases; queued prompts deliver per line at least once; launcher verifies the Team Up marker, ports 8300/8200, and exact five identities; credential isolation includes env_keys and api_key_env (commits 9c95d2e..de8e030)
+Final reliability evidence: 58/58 focused Python, 8/8 Node, full discovery 61/63 with only two pre-existing archive errors; exact launcher gate and CLAUDE_FINAL_OK/GEMINI_FINAL_OK live smokes passed
