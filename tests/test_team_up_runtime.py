@@ -358,6 +358,7 @@ class TeamUpRuntimeTests(unittest.TestCase):
         initial_tmux_targets: tuple[str, ...] = (),
         server_listening: bool = True,
         server_becomes_ready: bool = True,
+        dead_tmux_targets: tuple[str, ...] = (),
     ):
         source_script = Path(__file__).parents[1] / "macos-linux" / "start_team_up.sh"
 
@@ -424,7 +425,11 @@ class TeamUpRuntimeTests(unittest.TestCase):
             "        ;;\n"
             "    list-panes)\n"
             "        if grep -Fqx \"$target\" \"$TEAM_UP_TMUX_STATE\"; then\n"
-            "            printf '0\\n'\n"
+            "            if grep -Fqx \"$target\" \"$TEAM_UP_DEAD_TMUX_STATE\"; then\n"
+            "                printf '1\\n'\n"
+            "            else\n"
+            "                printf '0\\n'\n"
+            "            fi\n"
             "        else\n"
             "            exit 1\n"
             "        fi\n"
@@ -451,6 +456,8 @@ class TeamUpRuntimeTests(unittest.TestCase):
             "    kill-window)\n"
             "        awk -v target=\"$target\" '$0 != target' \"$TEAM_UP_TMUX_STATE\" > \"$TEAM_UP_TMUX_STATE.tmp\"\n"
             "        mv \"$TEAM_UP_TMUX_STATE.tmp\" \"$TEAM_UP_TMUX_STATE\"\n"
+            "        awk -v target=\"$target\" '$0 != target' \"$TEAM_UP_DEAD_TMUX_STATE\" > \"$TEAM_UP_DEAD_TMUX_STATE.tmp\"\n"
+            "        mv \"$TEAM_UP_DEAD_TMUX_STATE.tmp\" \"$TEAM_UP_DEAD_TMUX_STATE\"\n"
             "        ;;\n"
             "    *) exit 0 ;;\n"
             "esac\n",
@@ -464,6 +471,11 @@ class TeamUpRuntimeTests(unittest.TestCase):
             "".join(f"{target}\n" for target in initial_tmux_targets),
             encoding="utf-8",
         )
+        dead_tmux_state = root / "tmux.dead.state"
+        dead_tmux_state.write_text(
+            "".join(f"{target}\n" for target in dead_tmux_targets),
+            encoding="utf-8",
+        )
         listen_state = root / "listening"
         if server_listening:
             listen_state.touch()
@@ -473,6 +485,7 @@ class TeamUpRuntimeTests(unittest.TestCase):
             **os.environ,
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "TEAM_UP_TMUX_STATE": str(tmux_state),
+            "TEAM_UP_DEAD_TMUX_STATE": str(dead_tmux_state),
             "TEAM_UP_TMUX_LOG": str(tmux_log),
             "TEAM_UP_NOHUP_LOG": str(nohup_log),
             "TEAM_UP_LISTEN_STATE": str(listen_state),
@@ -546,6 +559,55 @@ class TeamUpRuntimeTests(unittest.TestCase):
                 )
             ]
             self.assertEqual(len(owner_starts), 5)
+
+    def test_launcher_replaces_dead_wrapper_owner_without_duplicate_window(self):
+        wrapper_targets = (
+            "agentchattr-team-up-server:wrapper-claude-lead",
+            "agentchattr-team-up-server:wrapper-gemini-video",
+            "agentchattr-team-up-server:wrapper-codex-sol",
+            "agentchattr-team-up-server:wrapper-codex-terra",
+            "agentchattr-team-up-server:wrapper-codex-luna",
+        )
+        dead_owner = "agentchattr-team-up-server:wrapper-codex-luna"
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            script, project, env, tmux_state, tmux_log, _ = (
+                self._make_wrapper_launcher_fixture(
+                    root,
+                    initial_tmux_targets=(
+                        "agentchattr-team-up-server",
+                        *wrapper_targets,
+                    ),
+                    dead_tmux_targets=(dead_owner,),
+                )
+            )
+
+            subprocess.run(
+                ["sh", str(script), str(project)],
+                check=True,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            targets = tmux_state.read_text("utf-8").splitlines()
+            self.assertEqual(targets.count(dead_owner), 1)
+            commands = tmux_log.read_text("utf-8").splitlines()
+            kill_command = (
+                "kill-window -t "
+                "=agentchattr-team-up-server:=wrapper-codex-luna"
+            )
+            self.assertIn(kill_command, commands)
+            kill_index = commands.index(kill_command)
+            restart_index = next(
+                index
+                for index, command in enumerate(commands)
+                if command.startswith(
+                    "new-window -d -t =agentchattr-team-up-server "
+                    "-n wrapper-codex-luna "
+                )
+            )
+            self.assertLess(kill_index, restart_index)
 
     def test_launcher_replaces_stale_visible_session_before_restarting_wrapper(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -663,7 +725,7 @@ class TeamUpRuntimeTests(unittest.TestCase):
                 )
             )
 
-    def test_launcher_preserves_similarly_prefixed_visible_session(self):
+    def test_launcher_preserves_similarly_prefixed_sessions_and_windows(self):
         real_tmux = shutil.which("tmux")
         if real_tmux is None:
             self.skipTest("tmux is required for the Team Up launcher")
@@ -677,9 +739,17 @@ class TeamUpRuntimeTests(unittest.TestCase):
             script = script_dir / "start_team_up.sh"
             shutil.copy2(source_script, script)
             (repo / "requirements.txt").write_text("", encoding="utf-8")
+            listen_state = root / "listening"
             python = repo / ".venv" / "bin" / "python"
             python.parent.mkdir(parents=True)
-            python.write_text("#!/bin/sh\nexec sleep 30\n", encoding="utf-8")
+            python.write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                f"    */run.py) : > \"{listen_state}\" ;;\n"
+                "esac\n"
+                "exec /bin/sleep 30\n",
+                encoding="utf-8",
+            )
             python.chmod(0o755)
             project = root / "project"
             project.mkdir()
@@ -687,6 +757,11 @@ class TeamUpRuntimeTests(unittest.TestCase):
             fake_bin = root / "bin"
             fake_bin.mkdir()
             (fake_bin / "lsof").write_text(
+                "#!/bin/sh\n"
+                "[ -f \"$TEAM_UP_LISTEN_STATE\" ]\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "sleep").write_text(
                 "#!/bin/sh\nexit 0\n",
                 encoding="utf-8",
             )
@@ -708,6 +783,7 @@ class TeamUpRuntimeTests(unittest.TestCase):
                 "TEAM_UP_REAL_TMUX": real_tmux,
                 "TEAM_UP_TMUX_SOCKET": str(socket_path),
                 "TEAM_UP_REAL_TMUX_LOG": str(tmux_log),
+                "TEAM_UP_LISTEN_STATE": str(listen_state),
             }
             try:
                 subprocess.run(
@@ -718,8 +794,22 @@ class TeamUpRuntimeTests(unittest.TestCase):
                         "-s",
                         "agentchattr-team-up-server",
                         "-n",
-                        "server",
-                        "sleep",
+                        "server-old",
+                        "/bin/sleep",
+                        "30",
+                    ],
+                    check=True,
+                )
+                subprocess.run(
+                    [
+                        *tmux_prefix,
+                        "new-window",
+                        "-d",
+                        "-t",
+                        "=agentchattr-team-up-server",
+                        "-n",
+                        "wrapper-codex-luna-old",
+                        "/bin/sleep",
                         "30",
                     ],
                     check=True,
@@ -731,19 +821,20 @@ class TeamUpRuntimeTests(unittest.TestCase):
                         "-d",
                         "-s",
                         "agentchattr-codex-luna-2",
-                        "sleep",
+                        "/bin/sleep",
                         "30",
                     ],
                     check=True,
                 )
 
-                subprocess.run(
+                launcher_result = subprocess.run(
                     ["sh", str(script), str(project)],
-                    check=True,
+                    check=False,
                     env=env,
                     capture_output=True,
                     text=True,
                 )
+                self.assertEqual(launcher_result.returncode, 0)
 
                 commands = tmux_log.read_text("utf-8").splitlines()
                 self.assertIn(
@@ -760,6 +851,26 @@ class TeamUpRuntimeTests(unittest.TestCase):
                     check=False,
                 )
                 self.assertEqual(suffix_session.returncode, 0)
+                windows = subprocess.run(
+                    [
+                        *tmux_prefix,
+                        "list-windows",
+                        "-t",
+                        "=agentchattr-team-up-server",
+                        "-F",
+                        "#{window_name}",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.splitlines()
+                self.assertEqual(windows.count("server"), 1)
+                self.assertEqual(windows.count("server-old"), 1)
+                self.assertEqual(windows.count("wrapper-codex-luna"), 1)
+                self.assertEqual(
+                    windows.count("wrapper-codex-luna-old"),
+                    1,
+                )
             finally:
                 subprocess.run(
                     [*tmux_prefix, "kill-server"],

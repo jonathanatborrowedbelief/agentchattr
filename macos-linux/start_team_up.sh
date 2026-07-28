@@ -14,7 +14,7 @@ LOG_DIR="$REPO_DIR/logs/team-up"
 SERVER_SESSION="agentchattr-team-up-server"
 SERVER_WINDOW="server"
 SERVER_SESSION_TARGET="=$SERVER_SESSION"
-SERVER_WINDOW_TARGET="=$SERVER_SESSION:$SERVER_WINDOW"
+SERVER_WINDOW_TARGET="=$SERVER_SESSION:=$SERVER_WINDOW"
 
 mkdir -p "$LOG_DIR"
 
@@ -76,7 +76,7 @@ fi
 
 wrapper_owner_is_live() {
     owner_window=$1
-    tmux_pane_is_live "=$SERVER_SESSION:$owner_window"
+    tmux_pane_is_live "=$SERVER_SESSION:=$owner_window"
 }
 
 start_wrapper() {
@@ -84,12 +84,17 @@ start_wrapper() {
     role=$2
     session="agentchattr-$identity"
     owner_window="wrapper-$identity"
+    owner_target="=$SERVER_SESSION:=$owner_window"
     log_file="$LOG_DIR/$identity.redacted.log"
 
     if wrapper_owner_is_live "$owner_window"; then
         printf 'Skipping %s; wrapper owner %s is still running.\n' \
             "$role" "$SERVER_SESSION:$owner_window"
         return
+    fi
+
+    if tmux_window_exists "$owner_target"; then
+        tmux kill-window -t "$owner_target"
     fi
 
     if tmux has-session -t "=$session" 2>/dev/null; then
