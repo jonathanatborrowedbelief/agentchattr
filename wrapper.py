@@ -150,6 +150,7 @@ _BUILTIN_DEFAULTS: dict[str, dict] = {
 }
 
 _VALID_INJECT_MODES = {"settings_file", "env", "flag", "proxy_flag", "env_content"}
+_MAX_ROLE_INSTRUCTIONS_BYTES = 16 * 1024
 
 
 def _load_selected_env(env_file: str, keys: list[str], environ: dict[str, str]) -> dict[str, str]:
@@ -162,6 +163,13 @@ def _load_selected_env(env_file: str, keys: list[str], environ: dict[str, str]) 
     try:
         lines = path.read_text("utf-8").splitlines()
     except OSError as exc:
+        inherited = {
+            key: value
+            for key in keys
+            if isinstance((value := environ.get(key, "")), str) and value.strip()
+        }
+        if len(inherited) == len(keys):
+            return inherited
         raise ValueError(f"Unable to read environment file: {path}") from exc
 
     requested = set(keys)
@@ -179,7 +187,12 @@ def _load_selected_env(env_file: str, keys: list[str], environ: dict[str, str]) 
     missing: list[str] = []
     for key in keys:
         inherited = environ.get(key, "")
-        value = inherited if isinstance(inherited, str) and inherited.strip() else parsed.get(key, "")
+        file_value = parsed.get(key, "")
+        value = (
+            file_value
+            if isinstance(file_value, str) and file_value.strip()
+            else inherited
+        )
         if not isinstance(value, str) or not value.strip():
             missing.append(key)
             continue
@@ -196,11 +209,73 @@ def _resolve_provider(agent: str, agent_cfg: dict) -> str:
 
 
 def _merge_launch_args(agent_cfg: dict, runtime_args: list[str]) -> list[str]:
-    """Put configured CLI arguments before runtime-added arguments."""
+    """Merge configured and runtime arguments with one effective model flag."""
     configured = agent_cfg.get("launch_args", [])
     if not isinstance(configured, list) or not all(isinstance(value, str) for value in configured):
         raise ValueError("launch_args must be a list of strings")
-    return [*configured, *runtime_args]
+    if not all(isinstance(value, str) for value in runtime_args):
+        raise ValueError("runtime launch arguments must be strings")
+
+    def split_model(arguments: list[str]) -> tuple[list[str], str | None]:
+        remaining: list[str] = []
+        model: str | None = None
+        index = 0
+        while index < len(arguments):
+            value = arguments[index]
+            if value == "--model" and index + 1 < len(arguments):
+                model = arguments[index + 1]
+                index += 2
+                continue
+            if value.startswith("--model="):
+                model = value.split("=", 1)[1]
+                index += 1
+                continue
+            remaining.append(value)
+            index += 1
+        return remaining, model
+
+    runtime_without_model, runtime_model = split_model(runtime_args)
+    if runtime_model is None:
+        return [*configured, *runtime_args]
+    configured_without_model, _ = split_model(configured)
+    return [
+        *configured_without_model,
+        *runtime_without_model,
+        "--model",
+        runtime_model,
+    ]
+
+
+def _load_role_instructions(control_root: Path, configured_path: str | None) -> str:
+    """Load bounded role rules from inside the agentchattr control root."""
+    if configured_path is None:
+        return ""
+    if not isinstance(configured_path, str) or not configured_path.strip():
+        raise ValueError("instructions_file must be a non-empty relative path")
+
+    root = control_root.resolve()
+    relative_path = Path(configured_path)
+    if relative_path.is_absolute():
+        raise ValueError("instructions_file must be relative to the control root")
+    path = (root / relative_path).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("instructions_file must stay inside the control root") from exc
+
+    try:
+        with path.open("rb") as instructions_stream:
+            payload = instructions_stream.read(_MAX_ROLE_INSTRUCTIONS_BYTES + 1)
+    except OSError as exc:
+        raise ValueError(f"Unable to read role instructions file: {path}") from exc
+    if len(payload) > _MAX_ROLE_INSTRUCTIONS_BYTES:
+        raise ValueError(
+            f"Role instructions file exceeds {_MAX_ROLE_INSTRUCTIONS_BYTES} bytes: {path}"
+        )
+    try:
+        return payload.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Role instructions file is not valid UTF-8: {path}") from exc
 
 
 def _resolve_runtime_cwd(cwd: str) -> str:
@@ -510,7 +585,7 @@ def _report_rule_sync(server_port: int, agent_name: str, epoch: int, token: str 
 
 def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = False, trigger_flag=None,
                    server_port: int = 8300, agent_name: str = "", get_token_fn=None,
-                   refresh_interval: int = 10):
+                   refresh_interval: int = 10, role_instructions: str = ""):
     """Poll queue file and inject an MCP read task when triggered."""
     first_mention = True
     last_rules_epoch = 0  # 0 = unknown/cold start — will inject on first trigger
@@ -576,6 +651,8 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                         role = _fetch_role(server_port, agent_name)
                     if role:
                         prompt += f"\n\nROLE: {role}"
+                    if role_instructions:
+                        prompt += f"\n\nROLE INSTRUCTIONS:\n{role_instructions}"
 
                     # Smart rules injection: first trigger, epoch change, or periodic refresh
                     _token = get_token_fn() if get_token_fn else ""
@@ -610,7 +687,56 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
+class _RegistrationCleanup:
+    """Exactly-once authenticated deregistration for a registered wrapper."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._registration: tuple[int, str, str] | None = None
+        self._attempted = False
+
+    def install(self, server_port: int, name: str, token: str) -> None:
+        with self._lock:
+            self._registration = (server_port, name, token)
+
+    def update(self, name: str, token: str) -> None:
+        with self._lock:
+            if self._registration is None:
+                return
+            server_port, _, _ = self._registration
+            self._registration = (server_port, name, token)
+
+    def run(self) -> None:
+        with self._lock:
+            if self._attempted or self._registration is None:
+                return
+            self._attempted = True
+            server_port, name, token = self._registration
+        try:
+            _deregister_instance(server_port, name, token)
+            print(f"  Deregistered {name}")
+        except Exception:
+            pass
+
+
+def _deregister_instance(server_port: int, name: str, token: str) -> None:
+    import urllib.parse
+    import urllib.request
+
+    request = urllib.request.Request(
+        (
+            f"http://127.0.0.1:{server_port}/api/deregister/"
+            f"{urllib.parse.quote(name, safe='')}"
+        ),
+        method="POST",
+        data=b"",
+        headers=_auth_headers(token),
+    )
+    with urllib.request.urlopen(request, timeout=5):
+        pass
+
+
+def _run_main(cleanup: _RegistrationCleanup):
     import argparse
     import urllib.error
     import urllib.request
@@ -638,6 +764,15 @@ def main():
     mcp_cfg = config.get("mcp", {})
 
     try:
+        role_instructions = _load_role_instructions(
+            ROOT,
+            agent_cfg.get("instructions_file"),
+        )
+    except ValueError as exc:
+        print(f"  Error: {exc}")
+        sys.exit(1)
+
+    try:
         registration = _register_instance_with_retry(server_port, agent, args.label)
     except Exception as exc:
         print(f"  Registration failed ({exc}).")
@@ -646,6 +781,7 @@ def main():
 
     assigned_name = registration["name"]
     assigned_token = registration["token"]
+    cleanup.install(server_port, assigned_name, assigned_token)
     print(f"  Registered as: {assigned_name} (slot {registration.get('slot', '?')})")
 
     assigned_role = args.role if args.role is not None else agent_cfg.get("role", "")
@@ -745,6 +881,7 @@ def main():
             if new_token and new_token != old_token:
                 print(f"  Session refreshed for @{current_name}")
             _rewrite_mcp_config(current_name, current_token)
+            cleanup.update(current_name, current_token)
 
         return changed
 
@@ -855,7 +992,8 @@ def main():
             args=(get_identity, inject_fn),
             kwargs={"is_multi_instance": _is_multi_instance, "trigger_flag": _trigger_flag,
                     "server_port": server_port, "agent_name": assigned_name,
-                    "get_token_fn": get_token, "refresh_interval": _refresh_interval},
+                    "get_token_fn": get_token, "refresh_interval": _refresh_interval,
+                    "role_instructions": role_instructions},
             daemon=True,
         )
         _watcher_thread.start()
@@ -870,7 +1008,8 @@ def main():
                     args=(get_identity, _watcher_inject_fn),
                     kwargs={"is_multi_instance": _is_multi_instance, "trigger_flag": _trigger_flag,
                             "server_port": server_port, "agent_name": assigned_name,
-                            "get_token_fn": get_token, "refresh_interval": _refresh_interval},
+                            "get_token_fn": get_token, "refresh_interval": _refresh_interval,
+                            "role_instructions": role_instructions},
                     daemon=True,
                 )
                 _watcher_thread.start()
@@ -956,24 +1095,18 @@ def main():
     try:
         run_agent(**run_kwargs)
     finally:
-        try:
-            current_name, _ = get_identity()
-            current_token = get_token()
-            dereg_req = urllib.request.Request(
-                f"http://127.0.0.1:{server_port}/api/deregister/{current_name}",
-                method="POST",
-                data=b"",
-                headers=_auth_headers(current_token),
-            )
-            urllib.request.urlopen(dereg_req, timeout=5)
-            print(f"  Deregistered {current_name}")
-        except Exception:
-            pass
-
         if proxy is not None:
             proxy.stop()
 
     print("  Wrapper stopped.")
+
+
+def main():
+    cleanup = _RegistrationCleanup()
+    try:
+        return _run_main(cleanup)
+    finally:
+        cleanup.run()
 
 
 if __name__ == "__main__":

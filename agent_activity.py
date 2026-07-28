@@ -52,6 +52,14 @@ class AgentActivityStore:
         self._max_events = max_events
         self._records: dict[str, dict] = {}
         self._lock = threading.RLock()
+        self._on_change: Callable[[], None] | None = None
+
+    def on_change(self, callback: Callable[[], None]):
+        """Set the callback fired after a visible lifecycle snapshot changes."""
+        if not callable(callback):
+            raise ValueError("on_change callback must be callable")
+        with self._lock:
+            self._on_change = callback
 
     def mark_queued(self, name: str, channel: str = "", job_id: int = 0):
         _validate_text_field(channel, "channel", allow_empty=True)
@@ -59,21 +67,26 @@ class AgentActivityStore:
 
     def mark_terminal(self, name: str, active: bool):
         _validate_text_field(name, "name")
+        callback = None
         with self._lock:
             record = self._records.get(name)
+            before = self._snapshot_record(record)
             if not active:
                 if record and record.get("terminal_until") is not None:
                     record["state"] = record.get("terminal_fallback", "IDLE")
                     record["terminal_until"] = None
-                return
-
-            record = self._get_record(name)
-            if record.get("terminal_until") is None:
-                fallback = record["state"] if record["state"] != "WORKING" else "IDLE"
-                record["terminal_fallback"] = fallback
-            record["terminal_until"] = self._clock() + self._terminal_lease_seconds
-            self._append_event(record, "WORKING", "terminal_activity")
-            record["state"] = "WORKING"
+            else:
+                record = self._get_record(name)
+                if record.get("terminal_until") is None:
+                    fallback = record["state"] if record["state"] != "WORKING" else "IDLE"
+                    record["terminal_fallback"] = fallback
+                record["terminal_until"] = self._clock() + self._terminal_lease_seconds
+                self._append_event(record, "WORKING", "terminal_activity")
+                record["state"] = "WORKING"
+            after = self._snapshot_record(record)
+            if before != after:
+                callback = self._on_change
+        self._notify(callback)
 
     def mark_tool(self, name: str, reason_code: str):
         self._record(name, "WORKING", reason_code)
@@ -92,42 +105,59 @@ class AgentActivityStore:
 
     def snapshot(self, name: str) -> dict:
         _validate_text_field(name, "name")
+        callback = None
         with self._lock:
             record = self._records.get(name)
-            if not record:
-                return {"state": "IDLE", "event": None, "recent_events": []}
-            self._expire_terminal(record)
-            events = [dict(event) for event in record["recent_events"]]
-            return {
-                "state": record["state"],
-                "event": dict(events[-1]) if events else None,
-                "recent_events": events,
-            }
+            before = self._snapshot_record(record)
+            if record:
+                self._expire_terminal(record)
+            result = self._snapshot_record(record)
+            if before != result:
+                callback = self._on_change
+        self._notify(callback)
+        return result
 
     def migrate_identity(self, old: str, new: str):
         _validate_text_field(old, "old name")
         _validate_text_field(new, "new name")
         if old == new:
             return
+        callback = None
         with self._lock:
+            before = (
+                self._snapshot_record(self._records.get(old)),
+                self._snapshot_record(self._records.get(new)),
+            )
             source = self._records.pop(old, None)
             if not source:
                 return
             target = self._records.get(new)
             if not target:
                 self._records[new] = source
-                return
-            combined = sorted(
-                [*target["recent_events"], *source["recent_events"]],
-                key=lambda event: event["time"],
-            )[-self._max_events :]
-            source["recent_events"] = combined
-            self._records[new] = source
+            else:
+                combined = sorted(
+                    [*target["recent_events"], *source["recent_events"]],
+                    key=lambda event: event["time"],
+                )[-self._max_events :]
+                source["recent_events"] = combined
+                self._records[new] = source
+            after = (
+                self._snapshot_record(self._records.get(old)),
+                self._snapshot_record(self._records.get(new)),
+            )
+            if before != after:
+                callback = self._on_change
+        self._notify(callback)
 
     def purge_identity(self, name: str):
         _validate_text_field(name, "name")
+        callback = None
         with self._lock:
-            self._records.pop(name, None)
+            before = self._snapshot_record(self._records.get(name))
+            removed = self._records.pop(name, None)
+            if removed is not None and before != self._snapshot_record(None):
+                callback = self._on_change
+        self._notify(callback)
 
     def _get_record(self, name: str) -> dict:
         return self._records.setdefault(
@@ -149,12 +179,37 @@ class AgentActivityStore:
         if reason_code not in _STATE_REASONS.get(state, set()):
             raise ValueError("reason is not allowed for state")
 
+        callback = None
         with self._lock:
             record = self._get_record(name)
+            before = self._snapshot_record(record)
             record["terminal_until"] = None
             record["terminal_fallback"] = "IDLE"
             self._append_event(record, state, reason_code)
             record["state"] = state
+            if before != self._snapshot_record(record):
+                callback = self._on_change
+        self._notify(callback)
+
+    @staticmethod
+    def _snapshot_record(record: dict | None) -> dict:
+        if not record:
+            return {"state": "IDLE", "event": None, "recent_events": []}
+        events = [dict(event) for event in record["recent_events"]]
+        return {
+            "state": record["state"],
+            "event": dict(events[-1]) if events else None,
+            "recent_events": events,
+        }
+
+    @staticmethod
+    def _notify(callback: Callable[[], None] | None):
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:
+            pass
 
     def _append_event(self, record: dict, state: str, reason_code: str):
         kind, caption = _CAPTIONS[reason_code]

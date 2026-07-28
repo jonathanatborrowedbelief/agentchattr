@@ -143,7 +143,7 @@ def main():
     print(f"  MCP HTTP: http://{host}:{http_port}/mcp  (Claude, Codex)")
     print(f"  MCP SSE:  http://{host}:{sse_port}/sse   (Gemini)")
     print(f"  Agents auto-trigger on @mention")
-    print(f"\n  Session token: {session_token}\n")
+    print()
 
     uvicorn.run(app, host=host, port=port, log_level="info")
 

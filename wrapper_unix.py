@@ -160,7 +160,6 @@ def run_agent(
                 print(f"  Reattach: tmux attach -t {session_name}")
                 while _session_exists(session_name):
                     time.sleep(1)
-                break
 
             # Session gone — agent exited
             if no_restart:

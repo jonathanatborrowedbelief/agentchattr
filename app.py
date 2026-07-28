@@ -507,6 +507,19 @@ _event_loop = None  # set by run.py after starting the event loop
 def set_event_loop(loop):
     global _event_loop
     _event_loop = loop
+    if loop is not None and activity_store is not None:
+        activity_store.on_change(_on_activity_change)
+
+
+def _on_activity_change():
+    """Schedule a secret-free status snapshot from any mutation thread."""
+    if _event_loop is None:
+        return
+    coroutine = broadcast_status()
+    try:
+        asyncio.run_coroutine_threadsafe(coroutine, _event_loop)
+    except Exception:
+        coroutine.close()
 
 
 def _on_store_message(msg: dict):
@@ -2238,17 +2251,11 @@ async def heartbeat(agent_name: str, request: Request):
     with mcp_bridge._presence_lock:
         mcp_bridge._presence[current_name] = __import__("time").time()
     # Optional activity report from wrapper's terminal monitor
-    _activity_changed = False
     if "active" in body:
         active_val = bool(body["active"])
-        was_active = mcp_bridge._activity.get(current_name, False)
         mcp_bridge.set_active(current_name, active_val)
         if activity_store:
             activity_store.mark_terminal(current_name, active_val)
-        _activity_changed = was_active != active_val
-    # Immediately broadcast on activity state change (don't wait for background checker)
-    if _activity_changed:
-        await broadcast_status()
     # Return canonical name so wrapper can track renames
     resp = {"ok": True, "name": current_name}
     if registry:

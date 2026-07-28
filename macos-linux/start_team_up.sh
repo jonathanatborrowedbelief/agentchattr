@@ -12,6 +12,7 @@ VENV_DIR="$REPO_DIR/.venv"
 PYTHON="$VENV_DIR/bin/python"
 LOG_DIR="$REPO_DIR/logs/team-up"
 PID_DIR="$REPO_DIR/.pids"
+SERVER_SESSION="agentchattr-team-up-server"
 
 mkdir -p "$LOG_DIR" "$PID_DIR"
 
@@ -37,8 +38,10 @@ wait_for_server() {
 }
 
 if ! port_is_listening; then
-    nohup "$PYTHON" "$REPO_DIR/run.py" >/dev/null 2>&1 &
-    printf '%s\n' "$!" >"$PID_DIR/server.pid"
+    if ! tmux has-session -t "$SERVER_SESSION" 2>/dev/null; then
+        tmux new-session -d -s "$SERVER_SESSION" -c "$REPO_DIR" \
+            "exec '$PYTHON' '$REPO_DIR/run.py'"
+    fi
 fi
 
 if ! wait_for_server; then
@@ -72,8 +75,14 @@ start_wrapper() {
     fi
 
     printf '%s\n' "Wrapper started; runtime output is suppressed to protect credentials." >"$log_file"
-    nohup "$PYTHON" "$REPO_DIR/wrapper.py" "$identity" \
-        --cwd "$PROJECT_DIR" --role "$role" >/dev/null 2>&1 &
+    if [ "$identity" = "gemini-video" ] && [ -n "${TEAM_UP_GEMINI_MODEL:-}" ]; then
+        nohup "$PYTHON" "$REPO_DIR/wrapper.py" "$identity" \
+            --cwd "$PROJECT_DIR" --role "$role" \
+            --model "$TEAM_UP_GEMINI_MODEL" >/dev/null 2>&1 &
+    else
+        nohup "$PYTHON" "$REPO_DIR/wrapper.py" "$identity" \
+            --cwd "$PROJECT_DIR" --role "$role" >/dev/null 2>&1 &
+    fi
     printf '%s\n' "$!" >"$pid_file"
 }
 

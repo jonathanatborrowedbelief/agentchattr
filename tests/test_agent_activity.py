@@ -80,6 +80,18 @@ class AgentActivityStoreTests(unittest.TestCase):
         self.assertEqual(events[0]["count"], 2)
         self.assertEqual(events[0]["time"], 1_002.0)
 
+    def test_change_callback_fires_only_for_visible_snapshot_changes(self):
+        changed = mock.Mock()
+        self.store.on_change(changed)
+
+        self.store.mark_queued("codex-terra")
+        self.store.mark_done("codex-terra", "response_posted")
+        with self.assertRaises(ValueError):
+            self.store.mark_done("codex-terra", "not-allowlisted")
+        self.store.purge_identity("missing-agent")
+
+        self.assertEqual(changed.call_count, 2)
+
     def test_identity_migration_and_purge(self):
         self.store.mark_done("codex-terra", "tests_complete")
 
@@ -280,6 +292,37 @@ class AgentActivityIntegrationTests(unittest.TestCase):
         serialized_status = json.dumps(status)
         for supplied in secrets.values():
             self.assertNotIn(supplied, serialized_status)
+
+    def test_waiting_and_done_changes_schedule_status_broadcast(self):
+        import app
+
+        scheduled = []
+
+        def capture(coroutine, loop):
+            scheduled.append((coroutine, loop))
+            coroutine.close()
+            return mock.Mock()
+
+        event_loop = mock.Mock()
+        with (
+            mock.patch.object(app, "activity_store", self.activity, create=True),
+            mock.patch.object(app, "broadcast_status", mock.AsyncMock()),
+            mock.patch.object(
+                app.asyncio,
+                "run_coroutine_threadsafe",
+                side_effect=capture,
+            ),
+        ):
+            app.set_event_loop(event_loop)
+            self.activity.mark_queued("codex-terra")
+            self.activity.mark_done("codex-terra", "response_posted")
+            with self.assertRaises(ValueError):
+                self.activity.mark_done("codex-terra", "not-allowlisted")
+            self.activity.purge_identity("missing-agent")
+            app.set_event_loop(None)
+
+        self.assertEqual(len(scheduled), 2)
+        self.assertTrue(all(loop is event_loop for _, loop in scheduled))
 
     def test_authenticated_heartbeat_creates_working_lease_without_false_done(self):
         import app

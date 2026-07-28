@@ -20,6 +20,7 @@ cwd = "~/Documents/Codex"
 label = "Claude Lead"
 role = "Lead"
 launch_args = ["--model", "opus", "--effort", "high"]
+instructions_file = "Claude.md"
 
 [agents.codex]
 command = "codex"
@@ -34,6 +35,7 @@ cwd = "~/Documents/Codex"
 label = "Codex Sol"
 role = "Integrator"
 launch_args = ["--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=high"]
+instructions_file = "Codex.md"
 
 [agents.codex-terra]
 provider = "codex"
@@ -42,6 +44,7 @@ cwd = "~/Documents/Codex"
 label = "Codex Terra"
 role = "Builder"
 launch_args = ["--model", "gpt-5.6-terra", "-c", "model_reasoning_effort=high"]
+instructions_file = "Codex.md"
 
 [agents.codex-luna]
 provider = "codex"
@@ -50,6 +53,7 @@ cwd = "~/Documents/Codex"
 label = "Codex Luna"
 role = "Scout"
 launch_args = ["--model", "gpt-5.6-luna", "-c", "model_reasoning_effort=medium"]
+instructions_file = "Codex.md"
 
 [agents.gemini]
 command = "gemini"
@@ -64,6 +68,7 @@ cwd = "~/Documents/Codex"
 label = "Gemini Video"
 role = "Video"
 launch_args = ["--model", "gemini-2.5-pro"]
+instructions_file = "Gemini.md"
 env_file = "~/Workspace/AG_Shared/.env.master"
 env_keys = ["GEMINI_API_KEY"]
 
