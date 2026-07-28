@@ -24,3 +24,5 @@ Final live repair: explicit credential overrides fail closed, configured credent
 Final relaunch: exact five identities and six owner windows stable; Claude and Gemini trigger smokes passed with Gemini CLI 0.52 operational fallback gemini-3.1-flash-lite
 Final branch repair: duplicate delayed messages cannot skip phases; queued prompts deliver per line at least once; launcher verifies the Team Up marker, ports 8300/8200, and exact five identities; credential isolation includes env_keys and api_key_env (commits 9c95d2e..de8e030)
 Final reliability evidence: 58/58 focused Python, 8/8 Node, full discovery 61/63 with only two pre-existing archive errors; exact launcher gate and CLAUDE_FINAL_OK/GEMINI_FINAL_OK live smokes passed
+Final race closure: shared cross-process append/claim lock and heartbeat-online readiness committed at a08c13f; scoped review PASS
+Final clean evidence: 59/59 focused Python, 8/8 Node, full discovery 62/64 with only two pre-existing archive errors; exact live readiness and CLAUDE_LIVE_A08C13F_OK/GEMINI_LIVE_A08C13F_OK chatter smokes passed

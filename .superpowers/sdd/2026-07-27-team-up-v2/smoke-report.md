@@ -71,6 +71,9 @@ The ordered scene content was not present in the filename or metadata. Claude ac
 - The post-review reliability relaunch required the exact health marker, MCP
   listener, and exact five-agent cast, then verified `CLAUDE_FINAL_OK` and
   `GEMINI_FINAL_OK`.
+- The final post-lock clean relaunch required all five exact identities to be
+  heartbeat-online and verified `CLAUDE_LIVE_A08C13F_OK` and
+  `GEMINI_LIVE_A08C13F_OK` through the production queue and chatter path.
 
 ## Activity feed
 
@@ -80,9 +83,9 @@ After completion `/api/status` reported all five exact identities available with
 
 | Check | Result |
 |---|---|
-| Focused Python runtime/session/activity suite | **58/58 passed** |
+| Focused Python runtime/session/activity suite | **59/59 passed** |
 | Node activity-status suite | **8/8 passed** |
-| Python full discovery | **61/63 passed; 2 pre-existing errors** |
+| Python full discovery | **62/64 passed; 2 pre-existing errors** |
 | Python compileall | **Passed** |
 | JavaScript syntax checks | **Passed** |
 | Launcher shell syntax | **Passed** |
@@ -103,5 +106,8 @@ The two full-suite errors are unchanged archive-feature failures at `archive.py:
 - Final full-branch review found and repaired atomic phase advancement,
   per-trigger at-least-once queue delivery, exact health/readiness validation,
   and `api_key_env` isolation. Scoped reliability re-review: PASS.
+- Final re-review found and repaired the append-versus-claim queue race with a
+  shared cross-process lock and replaced registration-only readiness with live
+  heartbeat readiness. Scoped reliability re-review: PASS.
 
 No credential values, registration tokens, web session tokens, raw prompts, or unfiltered terminal buffers were written to this report.

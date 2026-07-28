@@ -71,6 +71,8 @@ or persisted by the launcher.
 - The final reliability relaunch passed the exact service, MCP-port, and
   five-identity readiness gate, then verified `CLAUDE_FINAL_OK` and
   `GEMINI_FINAL_OK`.
+- The post-lock clean relaunch verified live chatter responses
+  `CLAUDE_LIVE_A08C13F_OK` and `GEMINI_LIVE_A08C13F_OK`.
 
 ## Activity feed
 
@@ -82,9 +84,9 @@ or persisted by the launcher.
 
 ## Verification
 
-- Focused runtime/session/activity Python suite: 58/58 passed.
+- Focused runtime/session/activity Python suite: 59/59 passed.
 - Node activity-status suite: 8/8 passed.
-- Full Python discovery: 61/63 passed; the only two errors are pre-existing
+- Full Python discovery: 62/64 passed; the only two errors are pre-existing
   archive tests at `archive.py:355` because `MessageStore._save` does not exist.
 - Python compileall, JavaScript syntax checks, launcher shell syntax, and
   `git diff --check`: passed.
@@ -93,8 +95,10 @@ or persisted by the launcher.
 - Session advancement is atomic against duplicate delayed messages.
 - Queue delivery is per-trigger and at-least-once across startup, restart, and
   tmux injection failure; pending batches are never cleared on wrapper start.
+  Producer appends and consumer claims share a cross-process queue lock.
 - The launcher requires the exact Team Up health marker, both ports 8300/8200,
-  and exactly the five stable identities before printing success.
+  and exactly the five heartbeat-online stable identities before printing
+  success.
 - Scoped credential, auto-mode, queue/reliability, and final repair reviews:
   PASS.
 
