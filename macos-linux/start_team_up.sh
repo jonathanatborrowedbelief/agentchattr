@@ -102,11 +102,24 @@ start_wrapper() {
     fi
 
     printf '%s\n' "Wrapper started; runtime output is suppressed to protect credentials." >"$log_file"
-    if [ "$identity" = "gemini-video" ] && [ -n "${TEAM_UP_GEMINI_MODEL:-}" ]; then
+    if [ "$identity" = "gemini-video" ] \
+        && [ -n "${TEAM_UP_GEMINI_MODEL:-}" ] \
+        && [ -n "${TEAM_UP_GEMINI_ENV_FILE:-}" ]; then
+        tmux new-window -d -t "$SERVER_SESSION_TARGET" -n "$owner_window" \
+            -c "$REPO_DIR" "$PYTHON" "$REPO_DIR/wrapper.py" "$identity" \
+            --cwd "$PROJECT_DIR" --role "$role" \
+            --model "$TEAM_UP_GEMINI_MODEL" \
+            --env-file "$TEAM_UP_GEMINI_ENV_FILE"
+    elif [ "$identity" = "gemini-video" ] && [ -n "${TEAM_UP_GEMINI_MODEL:-}" ]; then
         tmux new-window -d -t "$SERVER_SESSION_TARGET" -n "$owner_window" \
             -c "$REPO_DIR" "$PYTHON" "$REPO_DIR/wrapper.py" "$identity" \
             --cwd "$PROJECT_DIR" --role "$role" \
             --model "$TEAM_UP_GEMINI_MODEL"
+    elif [ "$identity" = "gemini-video" ] && [ -n "${TEAM_UP_GEMINI_ENV_FILE:-}" ]; then
+        tmux new-window -d -t "$SERVER_SESSION_TARGET" -n "$owner_window" \
+            -c "$REPO_DIR" "$PYTHON" "$REPO_DIR/wrapper.py" "$identity" \
+            --cwd "$PROJECT_DIR" --role "$role" \
+            --env-file "$TEAM_UP_GEMINI_ENV_FILE"
     else
         tmux new-window -d -t "$SERVER_SESSION_TARGET" -n "$owner_window" \
             -c "$REPO_DIR" "$PYTHON" "$REPO_DIR/wrapper.py" "$identity" \

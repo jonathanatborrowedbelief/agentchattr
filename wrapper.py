@@ -203,6 +203,13 @@ def _load_selected_env(env_file: str, keys: list[str], environ: dict[str, str]) 
     return loaded
 
 
+def _select_env_file(configured: str, runtime_override: str | None) -> str:
+    """Prefer an explicit runtime credential source without exposing its contents."""
+    if runtime_override and runtime_override.strip():
+        return runtime_override.strip()
+    return configured
+
+
 def _resolve_provider(agent: str, agent_cfg: dict) -> str:
     """Return the provider used for runtime behavior for an agent identity."""
     return str(agent_cfg.get("provider") or agent)
@@ -752,6 +759,12 @@ def _run_main(cleanup: _RegistrationCleanup):
     parser.add_argument("--label", type=str, default=None, help="Custom display label")
     parser.add_argument("--cwd", type=str, default=None, help="Override the agent working directory")
     parser.add_argument("--role", type=str, default=None, help="Override the agent role")
+    parser.add_argument(
+        "--env-file",
+        type=str,
+        default=None,
+        help="Override the configured credential file path",
+    )
     args, extra = parser.parse_known_args()
 
     agent = args.agent
@@ -922,7 +935,10 @@ def _run_main(cleanup: _RegistrationCleanup):
     if "env_file" in agent_cfg or "env_keys" in agent_cfg:
         try:
             selected_env = _load_selected_env(
-                env_file=agent_cfg.get("env_file", ""),
+                env_file=_select_env_file(
+                    agent_cfg.get("env_file", ""),
+                    args.env_file,
+                ),
                 keys=agent_cfg.get("env_keys", []),
                 environ=env,
             )

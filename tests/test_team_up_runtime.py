@@ -69,6 +69,18 @@ class TeamUpRuntimeTests(unittest.TestCase):
             ["--model", "gemini-2.5-flash"],
         )
 
+    def test_runtime_env_file_override_replaces_configured_source(self):
+        from wrapper import _select_env_file
+
+        self.assertEqual(
+            _select_env_file("~/shared.env", None),
+            "~/shared.env",
+        )
+        self.assertEqual(
+            _select_env_file("~/shared.env", "~/working-video.env"),
+            "~/working-video.env",
+        )
+
     def test_env_loader(self):
         from wrapper import _load_selected_env
 
@@ -1031,6 +1043,7 @@ class TeamUpRuntimeTests(unittest.TestCase):
                 **os.environ,
                 "PATH": f"{fake_bin}:{os.environ['PATH']}",
                 "TEAM_UP_GEMINI_MODEL": "gemini-2.5-flash",
+                "TEAM_UP_GEMINI_ENV_FILE": "/tmp/working-gemini.env",
                 "TEAM_UP_TMUX_LOG": str(tmux_log),
             }
             subprocess.run(
@@ -1059,9 +1072,15 @@ class TeamUpRuntimeTests(unittest.TestCase):
             gemini_args = shlex.split(gemini_invocation)
             model_index = gemini_args.index("--model")
             self.assertEqual(gemini_args[model_index + 1], "gemini-2.5-flash")
+            env_file_index = gemini_args.index("--env-file")
+            self.assertEqual(
+                gemini_args[env_file_index + 1],
+                "/tmp/working-gemini.env",
+            )
             self.assertTrue(
                 all(
                     "--model" not in shlex.split(invocation)
+                    and "--env-file" not in shlex.split(invocation)
                     for invocation in other_invocations
                 )
             )
