@@ -295,6 +295,20 @@ def _merge_selected_session_env(inject_env: dict[str, str], selected_env: dict[s
     return {**inject_env, **selected_env}
 
 
+def _isolate_selected_session_env(
+    parent_env: dict[str, str],
+    inject_env: dict[str, str],
+    selected_env: dict[str, str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Remove stale parent values before injecting the selected session values."""
+    isolated_parent = {
+        key: value
+        for key, value in parent_env.items()
+        if key not in selected_env
+    }
+    return isolated_parent, _merge_selected_session_env(inject_env, selected_env)
+
+
 def _resolve_mcp_inject(agent: str, agent_cfg: dict) -> dict:
     """Resolve MCP injection config: explicit agent_cfg > built-in defaults > None."""
     inject_mode = agent_cfg.get("mcp_inject")
@@ -945,7 +959,11 @@ def _run_main(cleanup: _RegistrationCleanup):
         except ValueError as exc:
             print(f"  Error: {exc}")
             sys.exit(1)
-        inject_env = _merge_selected_session_env(inject_env, selected_env)
+        env, inject_env = _isolate_selected_session_env(
+            env,
+            inject_env,
+            selected_env,
+        )
 
     print(f"  === {assigned_name.capitalize()} Chat Wrapper ===")
     if not needs_proxy:

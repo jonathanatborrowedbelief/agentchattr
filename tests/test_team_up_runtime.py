@@ -172,10 +172,14 @@ class TeamUpRuntimeTests(unittest.TestCase):
         self.assertEqual(requests, [("/api/roles/codex-sol", b'{"role": "Integrator"}')])
 
     def test_selected_environment_reaches_tmux_for_inherited_values(self):
-        from wrapper import _merge_selected_session_env
+        from wrapper import _isolate_selected_session_env
         from wrapper_unix import _build_tmux_new_session_command
 
-        session_env = _merge_selected_session_env(
+        parent_env, session_env = _isolate_selected_session_env(
+            {
+                "PATH": "/usr/bin",
+                "GEMINI_API_KEY": "stale-parent-value",
+            },
             {"MCP_SETTINGS": "settings-path"},
             {"GEMINI_API_KEY": "inherited-for-test"},
         )
@@ -188,6 +192,7 @@ class TeamUpRuntimeTests(unittest.TestCase):
 
         self.assertIn("GEMINI_API_KEY=inherited-for-test", command)
         self.assertIn("MCP_SETTINGS=settings-path", command)
+        self.assertEqual(parent_env, {"PATH": "/usr/bin"})
 
     def test_registration_retries_a_cold_server(self):
         from wrapper import _register_instance_with_retry
