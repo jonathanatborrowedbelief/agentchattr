@@ -187,6 +187,19 @@ class SessionEngine:
 
     def _advance(self, session: dict, message_id: int):
         """Advance session after the expected agent has responded."""
+        with self._lock:
+            current = self._store.get(session["id"])
+            if not current or current.get("state") not in ("active", "waiting"):
+                return
+            if (
+                current.get("current_phase") != session.get("current_phase")
+                or current.get("current_turn") != session.get("current_turn")
+            ):
+                return
+            self._advance_current(current, message_id)
+
+    def _advance_current(self, session: dict, message_id: int):
+        """Advance the current session state while the engine lock is held."""
         tmpl = self._store.get_template(session["template_id"])
         if not tmpl:
             self._store.interrupt(session["id"], "template not found")

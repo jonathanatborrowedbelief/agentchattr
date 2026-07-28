@@ -1,10 +1,12 @@
 import json
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import app
+from session_engine import SessionEngine
 from session_store import SessionStore, validate_session_template
 
 
@@ -65,6 +67,34 @@ class _SessionEngine:
 class _MessageStore:
     def add(self, *args, **kwargs):
         return None
+
+
+class _RecordingMessageStore:
+    def __init__(self):
+        self.callbacks = []
+        self.added = []
+
+    def on_message(self, callback):
+        self.callbacks.append(callback)
+
+    def add(self, *args, **kwargs):
+        self.added.append(kwargs)
+
+
+class _RecordingTrigger:
+    def __init__(self):
+        self.calls = []
+
+    def trigger_sync(self, agent, channel, prompt):
+        self.calls.append((agent, channel, prompt))
+
+
+class _AgentRegistry:
+    def __init__(self, agents):
+        self.agents = set(agents)
+
+    def is_registered(self, agent):
+        return agent in self.agents
 
 
 class TeamUpTemplateTests(unittest.TestCase):
@@ -196,6 +226,121 @@ process.stdout.write(JSON.stringify(cast));
         )
 
         self.assertEqual(json.loads(result.stdout), DEFAULT_CAST)
+
+
+class TeamUpSessionAdvancementTests(unittest.TestCase):
+    def test_duplicate_expected_agent_messages_advance_only_one_phase(self):
+        pending_timers = []
+
+        class DeferredTimer:
+            def __init__(self, interval, function, args=None, kwargs=None):
+                self.function = function
+                self.args = args or ()
+                self.kwargs = kwargs or {}
+
+            def start(self):
+                pending_timers.append(self)
+
+            def run(self):
+                self.function(*self.args, **self.kwargs)
+
+        template = {
+            "id": "duplicate-delay",
+            "name": "Duplicate delay",
+            "roles": ["lead", "output"],
+            "phases": [
+                {
+                    "name": "Plan",
+                    "prompt": "Plan.",
+                    "participants": ["lead"],
+                },
+                {
+                    "name": "Output",
+                    "prompt": "Deliver.",
+                    "participants": ["output"],
+                    "is_output": True,
+                },
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            templates_dir = root / "templates"
+            templates_dir.mkdir()
+            (templates_dir / "duplicate-delay.json").write_text(
+                json.dumps(template),
+                encoding="utf-8",
+            )
+            sessions = SessionStore(
+                str(root / "sessions.json"),
+                templates_dir=str(templates_dir),
+            )
+            messages = _RecordingMessageStore()
+            trigger = _RecordingTrigger()
+            engine = SessionEngine(
+                sessions,
+                messages,
+                trigger,
+                registry=_AgentRegistry({"claude-lead", "codex-sol"}),
+            )
+            session = engine.start_session(
+                "duplicate-delay",
+                "general",
+                {"lead": "claude-lead", "output": "codex-sol"},
+                "user",
+            )
+
+            with mock.patch("session_engine.threading.Timer", DeferredTimer):
+                engine._on_message(
+                    {
+                        "id": 101,
+                        "sender": "claude-lead",
+                        "type": "chat",
+                        "channel": "general",
+                    }
+                )
+                engine._on_message(
+                    {
+                        "id": 102,
+                        "sender": "claude-lead",
+                        "type": "chat",
+                        "channel": "general",
+                    }
+                )
+
+            self.assertEqual(len(pending_timers), 2)
+            for timer in list(pending_timers):
+                timer.run()
+
+            current = sessions.get(session["id"])
+            self.assertEqual(current["current_phase"], 1)
+            self.assertEqual(current["current_turn"], 0)
+            self.assertEqual(current["state"], "waiting")
+            self.assertEqual(
+                [call[0] for call in trigger.calls],
+                ["claude-lead", "codex-sol"],
+            )
+            self.assertEqual(
+                [message["text"] for message in messages.added],
+                ["Phase: Output"],
+            )
+
+            pending_timers.clear()
+            with mock.patch("session_engine.threading.Timer", DeferredTimer):
+                engine._on_message(
+                    {
+                        "id": 103,
+                        "sender": "codex-sol",
+                        "type": "chat",
+                        "channel": "general",
+                    }
+                )
+            self.assertEqual(len(pending_timers), 1)
+            pending_timers[0].run()
+
+            completed = sessions.get(session["id"])
+            self.assertEqual(completed["state"], "complete")
+            self.assertEqual(completed["output_message_id"], 103)
 
 
 if __name__ == "__main__":
