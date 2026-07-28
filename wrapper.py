@@ -961,6 +961,8 @@ def _run_main(cleanup: _RegistrationCleanup):
 
         return changed
 
+    queue_file = _identity["queue"]
+
     try:
         credential_keys = _configured_credential_keys(config)
     except ValueError as exc:
