@@ -169,13 +169,108 @@ class TeamUpRuntimeTests(unittest.TestCase):
                 "claude-lead": {},
                 "gemini-video": {"env_keys": ["GEMINI_API_KEY"]},
                 "codex-sol": {"env_keys": ["CODEX_PRIVATE_KEY"]},
+                "minimax": {"api_key_env": "MINIMAX_API_KEY"},
             }
         }
 
         self.assertEqual(
             _configured_credential_keys(config),
-            {"GEMINI_API_KEY", "CODEX_PRIVATE_KEY"},
+            {"GEMINI_API_KEY", "CODEX_PRIVATE_KEY", "MINIMAX_API_KEY"},
         )
+
+    def test_failed_queue_injection_preserves_batch_for_retry(self):
+        import wrapper
+
+        class StopWatcher(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            queue_file = Path(temporary_dir) / "codex-sol_queue.jsonl"
+            queue_file.write_text(
+                '{"channel":"general","prompt":"RETRY_ME"}\n',
+                encoding="utf-8",
+            )
+            with (
+                mock.patch("wrapper._fetch_role", return_value="Integrator"),
+                mock.patch("wrapper._fetch_active_rules", return_value=None),
+                mock.patch(
+                    "wrapper.time.sleep",
+                    side_effect=[None, StopWatcher()],
+                ),
+            ):
+                with self.assertRaises(StopWatcher):
+                    wrapper._queue_watcher(
+                        lambda: ("codex-sol", queue_file),
+                        mock.Mock(side_effect=RuntimeError("tmux unavailable")),
+                        agent_name="codex-sol",
+                    )
+
+            inflight = Path(f"{queue_file}.inflight")
+            self.assertTrue(inflight.exists())
+            self.assertIn("RETRY_ME", inflight.read_text("utf-8"))
+
+    def test_successful_queue_retry_acknowledges_preserved_batch(self):
+        import wrapper
+
+        class StopWatcher(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            queue_file = Path(temporary_dir) / "codex-sol_queue.jsonl"
+            inflight = Path(f"{queue_file}.inflight")
+            inflight.write_text(
+                '{"channel":"general","prompt":"DELIVER_ME"}\n',
+                encoding="utf-8",
+            )
+            injected = []
+            with (
+                mock.patch("wrapper._fetch_role", return_value="Integrator"),
+                mock.patch("wrapper._fetch_active_rules", return_value=None),
+                mock.patch(
+                    "wrapper.time.sleep",
+                    side_effect=[None, StopWatcher()],
+                ),
+            ):
+                with self.assertRaises(StopWatcher):
+                    wrapper._queue_watcher(
+                        lambda: ("codex-sol", queue_file),
+                        lambda prompt: injected.append(prompt) or True,
+                        agent_name="codex-sol",
+                    )
+
+            self.assertEqual(injected, ["DELIVER_ME\n\nROLE: Integrator"])
+            self.assertFalse(inflight.exists())
+
+    def test_queue_batch_delivers_each_distinct_prompt_in_order(self):
+        import wrapper
+
+        class StopWatcher(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            queue_file = Path(temporary_dir) / "codex-sol_queue.jsonl"
+            queue_file.write_text(
+                '{"prompt":"FIRST"}\n{"prompt":"SECOND"}\n',
+                encoding="utf-8",
+            )
+            injected = []
+            with (
+                mock.patch("wrapper._fetch_role", return_value=""),
+                mock.patch("wrapper._fetch_active_rules", return_value=None),
+                mock.patch(
+                    "wrapper.time.sleep",
+                    side_effect=[None, None, None, StopWatcher()],
+                ),
+            ):
+                with self.assertRaises(StopWatcher):
+                    wrapper._queue_watcher(
+                        lambda: ("codex-sol", queue_file),
+                        lambda prompt: injected.append(prompt) or True,
+                        agent_name="codex-sol",
+                    )
+
+            self.assertEqual(injected, ["FIRST", "SECOND"])
+            self.assertFalse(Path(f"{queue_file}.inflight").exists())
 
     def test_runtime_cwd_expands_environment_and_home(self):
         from wrapper import _resolve_runtime_cwd
@@ -289,6 +384,100 @@ class TeamUpRuntimeTests(unittest.TestCase):
         ]
         self.assertEqual(len(new_sessions), 2)
         sleep.assert_any_call(3)
+
+    def test_unix_injection_checks_both_tmux_send_steps(self):
+        from wrapper_unix import inject
+
+        with (
+            mock.patch(
+                "wrapper_unix.subprocess.run",
+                side_effect=[
+                    SimpleNamespace(returncode=0),
+                    SimpleNamespace(returncode=0),
+                ],
+            ) as run,
+            mock.patch("wrapper_unix.time.sleep"),
+        ):
+            self.assertTrue(
+                inject("SAFE_PROMPT", tmux_session="agentchattr-codex-sol")
+            )
+        self.assertEqual(run.call_count, 2)
+
+        with mock.patch(
+            "wrapper_unix.subprocess.run",
+            return_value=SimpleNamespace(returncode=1),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "tmux injection failed"):
+                inject("SAFE_PROMPT", tmux_session="agentchattr-codex-sol")
+
+    def test_watcher_starts_only_after_tmux_session_exists(self):
+        from wrapper_unix import run_agent
+
+        events = []
+
+        def fake_run(command, **kwargs):
+            events.append(("command", command[:3]))
+            return SimpleNamespace(returncode=0)
+
+        with (
+            mock.patch("wrapper_unix._check_tmux"),
+            mock.patch("wrapper_unix.subprocess.run", side_effect=fake_run),
+            mock.patch("wrapper_unix._session_exists", return_value=False),
+        ):
+            run_agent(
+                command="codex",
+                extra_args=[],
+                cwd="/tmp",
+                env={},
+                queue_file=Path("/tmp/unused-queue"),
+                agent="codex-sol",
+                no_restart=True,
+                start_watcher=lambda inject_fn: events.append(("watcher", None)),
+                session_name="agentchattr-codex-sol",
+            )
+
+        session_index = events.index(
+            ("command", ["tmux", "new-session", "-d"])
+        )
+        watcher_index = events.index(("watcher", None))
+        self.assertLess(session_index, watcher_index)
+
+    def test_team_up_health_reports_exact_ready_cast(self):
+        import asyncio
+        import app
+
+        expected = {
+            "claude-lead",
+            "gemini-video",
+            "codex-sol",
+            "codex-terra",
+            "codex-luna",
+        }
+        fake_agents = SimpleNamespace(
+            is_available=lambda name: name in expected
+        )
+        exact_registry = SimpleNamespace(
+            get_active_names=lambda: sorted(expected)
+        )
+        with (
+            mock.patch.object(app, "agents", fake_agents),
+            mock.patch.object(app, "registry", exact_registry),
+        ):
+            payload = asyncio.run(app.team_up_health())
+
+        self.assertEqual(payload["service"], "agentchattr-team-up-v2")
+        self.assertTrue(payload["ready"])
+        self.assertEqual(set(payload["agents"]), expected)
+
+        suffixed_registry = SimpleNamespace(
+            get_active_names=lambda: [*sorted(expected), "gemini-video-2"]
+        )
+        with (
+            mock.patch.object(app, "agents", fake_agents),
+            mock.patch.object(app, "registry", suffixed_registry),
+        ):
+            payload = asyncio.run(app.team_up_health())
+        self.assertFalse(payload["ready"])
 
     def test_role_instructions_use_control_root_and_reach_each_trigger(self):
         import wrapper
@@ -420,6 +609,8 @@ class TeamUpRuntimeTests(unittest.TestCase):
         server_listening: bool = True,
         server_becomes_ready: bool = True,
         dead_tmux_targets: tuple[str, ...] = (),
+        health_ready: bool = True,
+        agents_ready: bool = True,
     ):
         source_script = Path(__file__).parents[1] / "macos-linux" / "start_team_up.sh"
 
@@ -431,7 +622,18 @@ class TeamUpRuntimeTests(unittest.TestCase):
         (repo / "requirements.txt").write_text("", encoding="utf-8")
         python = repo / ".venv" / "bin" / "python"
         python.parent.mkdir(parents=True)
-        python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        python.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = \"-c\" ]; then\n"
+            "    case \"$3\" in\n"
+            "        server) [ \"$TEAM_UP_HEALTH_READY\" = \"1\" ] ;;\n"
+            "        agents) [ \"$TEAM_UP_AGENTS_READY\" = \"1\" ] ;;\n"
+            "    esac\n"
+            "    exit $?\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
         python.chmod(0o755)
         project = root / "project"
         project.mkdir()
@@ -553,6 +755,8 @@ class TeamUpRuntimeTests(unittest.TestCase):
             "TEAM_UP_SERVER_BECOMES_READY": (
                 "1" if server_becomes_ready else "0"
             ),
+            "TEAM_UP_HEALTH_READY": "1" if health_ready else "0",
+            "TEAM_UP_AGENTS_READY": "1" if agents_ready else "0",
         }
         return script, project, env, tmux_state, tmux_log, nohup_log
 
@@ -786,6 +990,59 @@ class TeamUpRuntimeTests(unittest.TestCase):
                 )
             )
 
+    def test_launcher_rejects_unrelated_listener_and_missing_agent_cast(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            script, project, env, tmux_state, _, _ = (
+                self._make_wrapper_launcher_fixture(
+                    root,
+                    server_listening=True,
+                    server_becomes_ready=False,
+                    health_ready=False,
+                )
+            )
+            result = subprocess.run(
+                ["sh", str(script), str(project)],
+                check=False,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("Team Up: http://", result.stdout)
+            self.assertFalse(
+                any(
+                    ":wrapper-" in target
+                    for target in tmux_state.read_text("utf-8").splitlines()
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            script, project, env, tmux_state, _, _ = (
+                self._make_wrapper_launcher_fixture(
+                    root,
+                    server_listening=True,
+                    health_ready=True,
+                    agents_ready=False,
+                )
+            )
+            result = subprocess.run(
+                ["sh", str(script), str(project)],
+                check=False,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("Team Up: http://", result.stdout)
+            self.assertTrue(
+                any(
+                    ":wrapper-" in target
+                    for target in tmux_state.read_text("utf-8").splitlines()
+                )
+            )
+
     def test_launcher_preserves_similarly_prefixed_sessions_and_windows(self):
         real_tmux = shutil.which("tmux")
         if real_tmux is None:
@@ -806,6 +1063,7 @@ class TeamUpRuntimeTests(unittest.TestCase):
             python.write_text(
                 "#!/bin/sh\n"
                 "case \"$1\" in\n"
+                "    -c) exit 0 ;;\n"
                 f"    */run.py) : > \"{listen_state}\" ;;\n"
                 "esac\n"
                 "exec /bin/sleep 30\n",

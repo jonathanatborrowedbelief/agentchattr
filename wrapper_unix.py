@@ -43,16 +43,21 @@ def inject(text: str, *, tmux_session: str, delay: float = 0.3):
     """Send text + Enter to a tmux session via send-keys."""
     # Use -l to send text literally (avoids misinterpreting as key names),
     # then send Enter as a separate key press
-    subprocess.run(
+    typed = subprocess.run(
         ["tmux", "send-keys", "-t", tmux_session, "-l", text],
         capture_output=True,
     )
+    if typed.returncode != 0:
+        raise RuntimeError("tmux injection failed before prompt submission")
     # Let TUI process the text before sending Enter (matches Windows wrapper)
     time.sleep(delay)
-    subprocess.run(
+    submitted = subprocess.run(
         ["tmux", "send-keys", "-t", tmux_session, "Enter"],
         capture_output=True,
     )
+    if submitted.returncode != 0:
+        raise RuntimeError("tmux injection failed during prompt submission")
+    return True
 
 
 def get_activity_checker(session_name, trigger_flag=None):
@@ -124,9 +129,10 @@ def run_agent(
     from pathlib import Path
     abs_cwd = str(Path(cwd).resolve())
 
-    # Wire up injection with the tmux session name
+    # Wire up injection with the tmux session name. The watcher starts only
+    # after the first tmux session exists, so startup cannot drop a prompt.
     inject_fn = lambda text: inject(text, tmux_session=session_name, delay=inject_delay)
-    start_watcher(inject_fn)
+    watcher_started = False
 
     print(f"  Using tmux session: {session_name}")
     print(f"  Detach: Ctrl+B, D  (agent keeps running)")
@@ -148,6 +154,9 @@ def run_agent(
             if result.returncode != 0:
                 print(f"  Error: failed to create tmux session (exit {result.returncode})")
                 break
+            if not watcher_started:
+                start_watcher(inject_fn)
+                watcher_started = True
 
             # Attach — blocks until agent exits or user detaches (Ctrl+B, D)
             subprocess.run(["tmux", "attach-session", "-t", session_name])

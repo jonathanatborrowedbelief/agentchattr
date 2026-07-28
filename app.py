@@ -29,6 +29,13 @@ from agent_activity import AgentActivityStore
 log = logging.getLogger(__name__)
 
 app = FastAPI(title="agentchattr")
+TEAM_UP_IDENTITIES = (
+    "claude-lead",
+    "gemini-video",
+    "codex-sol",
+    "codex-terra",
+    "codex-luna",
+)
 
 # --- globals (set by configure()) ---
 store: MessageStore | None = None
@@ -187,6 +194,15 @@ def _install_security_middleware(token: str, cfg: dict):
             # The index page injects the token client-side via same-origin script.
             # Uploads use random filenames and have path-traversal protection.
             if path == "/" or path.startswith(("/static/", "/uploads/", "/api/roles")):
+                return await call_next(request)
+
+            if path == "/healthz":
+                client_ip = request.client.host if request.client else ""
+                if client_ip not in ("127.0.0.1", "::1", "localhost"):
+                    return JSONResponse(
+                        {"error": "forbidden: health is restricted to loopback"},
+                        status_code=403,
+                    )
                 return await call_next(request)
 
             # Agent registration/heartbeat: loopback only (no remote agent minting).
@@ -1566,6 +1582,29 @@ async def get_status():
     status = agents.get_status()
     status["paused"] = any(router.is_paused(ch) for ch in room_settings.get("channels", ["general"]))
     return status
+
+
+@app.get("/healthz")
+async def team_up_health():
+    available = {
+        name
+        for name in TEAM_UP_IDENTITIES
+        if agents is not None and agents.is_available(name)
+    }
+    active_team_up = set(available)
+    if registry is not None:
+        for name in registry.get_active_names():
+            if any(
+                name == base or name.startswith(f"{base}-")
+                for base in TEAM_UP_IDENTITIES
+            ):
+                active_team_up.add(name)
+    expected = set(TEAM_UP_IDENTITIES)
+    return {
+        "service": "agentchattr-team-up-v2",
+        "ready": active_team_up == expected,
+        "agents": sorted(active_team_up),
+    }
 
 
 @app.get("/api/settings")

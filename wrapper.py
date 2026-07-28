@@ -228,6 +228,11 @@ def _configured_credential_keys(config: dict) -> set[str]:
         if not all(isinstance(key, str) and key for key in configured):
             raise ValueError("env_keys must be a list of non-empty strings")
         keys.update(configured)
+        api_key_env = agent_cfg.get("api_key_env")
+        if api_key_env is not None:
+            if not isinstance(api_key_env, str) or not api_key_env:
+                raise ValueError("api_key_env must be a non-empty string")
+            keys.add(api_key_env)
     return keys
 
 
@@ -625,6 +630,18 @@ def _report_rule_sync(server_port: int, agent_name: str, epoch: int, token: str 
         pass
 
 
+def _claim_queue_batch(queue_file: Path) -> Path | None:
+    """Atomically claim pending work so new appends and failed delivery survive."""
+    inflight = Path(f"{queue_file}.inflight")
+    if inflight.exists():
+        return inflight
+    try:
+        os.replace(queue_file, inflight)
+    except FileNotFoundError:
+        return None
+    return inflight
+
+
 def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = False, trigger_flag=None,
                    server_port: int = 8300, agent_name: str = "", get_token_fn=None,
                    refresh_interval: int = 10, role_instructions: str = ""):
@@ -632,51 +649,48 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
     first_mention = True
     last_rules_epoch = 0  # 0 = unknown/cold start — will inject on first trigger
     trigger_count = 0
+    delivery_failure_reported = False
     while True:
+        batch_file = None
         try:
             _, queue_file = get_identity_fn()
-            if queue_file.exists() and queue_file.stat().st_size > 0:
-                with open(queue_file, "r", encoding="utf-8") as f:
+            batch_file = _claim_queue_batch(queue_file)
+            if batch_file is not None:
+                with open(batch_file, "r", encoding="utf-8") as f:
                     lines = f.readlines()
-                queue_file.write_text("", "utf-8")
 
-                has_trigger = False
-                channel = "general"
-                for line in lines:
-                    line = line.strip()
+                selected = None
+                remaining_lines = []
+                for raw_line in lines:
+                    line = raw_line.strip()
                     if not line:
                         continue
                     try:
                         data = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    has_trigger = True
-                    if isinstance(data, dict) and "channel" in data:
-                        channel = data["channel"]
+                    if not isinstance(data, dict):
+                        continue
+                    if selected is None:
+                        selected = data
+                    else:
+                        remaining_lines.append(raw_line)
 
-                if has_trigger:
+                if selected is not None:
                     # Signal activity BEFORE injecting — covers the thinking phase
                     if trigger_flag is not None:
                         trigger_flag[0] = True
                     time.sleep(0.5)
 
                     # Check if this is a job/activity-scoped trigger
-                    job_id = None
-                    custom_prompt = ""
-                    for line in lines:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            data = json.loads(line)
-                            if isinstance(data, dict) and "job_id" in data:
-                                job_id = data["job_id"]
-                            if isinstance(data, dict):
-                                raw_prompt = data.get("prompt", "")
-                                if isinstance(raw_prompt, str) and raw_prompt.strip():
-                                    custom_prompt = raw_prompt.strip()
-                        except json.JSONDecodeError:
-                            pass
+                    channel = selected.get("channel", "general")
+                    job_id = selected.get("job_id")
+                    raw_prompt = selected.get("prompt", "")
+                    custom_prompt = (
+                        raw_prompt.strip()
+                        if isinstance(raw_prompt, str)
+                        else ""
+                    )
 
                     if custom_prompt:
                         prompt = custom_prompt
@@ -717,10 +731,24 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
 
                     if first_mention and is_multi_instance:
                         prompt += _IDENTITY_HINT
+                    delivered = inject_fn(prompt)
+                    if delivered is False:
+                        raise RuntimeError("agent prompt injection was rejected")
+                    if first_mention and is_multi_instance:
                         first_mention = False
-                    inject_fn(prompt)
+
+                if remaining_lines:
+                    batch_file.write_text(
+                        "".join(remaining_lines),
+                        encoding="utf-8",
+                    )
+                else:
+                    batch_file.unlink(missing_ok=True)
+                delivery_failure_reported = False
         except Exception:
-            pass
+            if batch_file is not None and not delivery_failure_reported:
+                print("  Warning: queued prompt delivery failed; retrying safely.")
+                delivery_failure_reported = True
 
         time.sleep(1)
 
@@ -932,10 +960,6 @@ def _run_main(cleanup: _RegistrationCleanup):
             cleanup.update(current_name, current_token)
 
         return changed
-
-    queue_file = _identity["queue"]
-    if queue_file.exists():
-        queue_file.write_text("", "utf-8")
 
     try:
         credential_keys = _configured_credential_keys(config)

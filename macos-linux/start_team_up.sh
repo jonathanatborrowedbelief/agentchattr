@@ -34,13 +34,63 @@ if [ ! -x "$PYTHON" ]; then
 fi
 
 port_is_listening() {
-    lsof -nP -iTCP:8300 -sTCP:LISTEN >/dev/null 2>&1
+    port=$1
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+team_up_health_matches() {
+    mode=$1
+    "$PYTHON" -c '
+import json
+import sys
+import urllib.request
+
+mode = sys.argv[1]
+expected = {
+    "claude-lead",
+    "gemini-video",
+    "codex-sol",
+    "codex-terra",
+    "codex-luna",
+}
+try:
+    with urllib.request.urlopen("http://127.0.0.1:8300/healthz", timeout=1) as response:
+        payload = json.load(response)
+    valid = payload.get("service") == "agentchattr-team-up-v2"
+    if mode == "agents":
+        valid = (
+            valid
+            and payload.get("ready") is True
+            and set(payload.get("agents", [])) == expected
+        )
+except Exception:
+    valid = False
+raise SystemExit(0 if valid else 1)
+' "$mode" >/dev/null 2>&1
+}
+
+server_is_ready() {
+    port_is_listening 8300 \
+        && port_is_listening 8200 \
+        && team_up_health_matches server
 }
 
 wait_for_server() {
     attempts=20
     while [ "$attempts" -gt 0 ]; do
-        if port_is_listening; then
+        if server_is_ready; then
+            return 0
+        fi
+        attempts=$((attempts - 1))
+        sleep 1
+    done
+    return 1
+}
+
+wait_for_team() {
+    attempts=30
+    while [ "$attempts" -gt 0 ]; do
+        if team_up_health_matches agents; then
             return 0
         fi
         attempts=$((attempts - 1))
@@ -62,20 +112,18 @@ tmux_window_exists() {
     tmux list-panes -t "$target" -F '#{pane_id}' >/dev/null 2>&1
 }
 
-if ! port_is_listening; then
-    if ! tmux_pane_is_live "$SERVER_WINDOW_TARGET"; then
-        if tmux has-session -t "$SERVER_SESSION_TARGET" 2>/dev/null; then
-            if tmux_window_exists "$SERVER_WINDOW_TARGET"; then
-                tmux kill-window -t "$SERVER_WINDOW_TARGET"
-            fi
-            tmux new-window -d -t "$SERVER_SESSION_TARGET" \
-                -n "$SERVER_WINDOW" -c "$REPO_DIR" \
-                "$PYTHON" "$REPO_DIR/run.py"
-        else
-            tmux new-session -d -s "$SERVER_SESSION" \
-                -n "$SERVER_WINDOW" -c "$REPO_DIR" \
-                "$PYTHON" "$REPO_DIR/run.py"
+if ! server_is_ready; then
+    if tmux has-session -t "$SERVER_SESSION_TARGET" 2>/dev/null; then
+        if tmux_window_exists "$SERVER_WINDOW_TARGET"; then
+            tmux kill-window -t "$SERVER_WINDOW_TARGET"
         fi
+        tmux new-window -d -t "$SERVER_SESSION_TARGET" \
+            -n "$SERVER_WINDOW" -c "$REPO_DIR" \
+            "$PYTHON" "$REPO_DIR/run.py"
+    else
+        tmux new-session -d -s "$SERVER_SESSION" \
+            -n "$SERVER_WINDOW" -c "$REPO_DIR" \
+            "$PYTHON" "$REPO_DIR/run.py"
     fi
 fi
 
@@ -142,6 +190,11 @@ start_wrapper "gemini-video" "Video"
 start_wrapper "codex-sol" "Integrator"
 start_wrapper "codex-terra" "Builder"
 start_wrapper "codex-luna" "Scout"
+
+if ! wait_for_team; then
+    printf '%s\n' "Team Up agents failed to register; runtime is not ready." >&2
+    exit 1
+fi
 
 printf '\nTeam Up: http://127.0.0.1:8300\n'
 printf '%s\n' "Lead:       agentchattr-claude-lead    tmux attach -t =agentchattr-claude-lead"
