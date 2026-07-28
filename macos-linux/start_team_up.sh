@@ -11,10 +11,9 @@ PROJECT_DIR=$(CDPATH= cd -- "$PROJECT_DIR" && pwd)
 VENV_DIR="$REPO_DIR/.venv"
 PYTHON="$VENV_DIR/bin/python"
 LOG_DIR="$REPO_DIR/logs/team-up"
-PID_DIR="$REPO_DIR/.pids"
 SERVER_SESSION="agentchattr-team-up-server"
 
-mkdir -p "$LOG_DIR" "$PID_DIR"
+mkdir -p "$LOG_DIR"
 
 if [ ! -x "$PYTHON" ]; then
     python3 -m venv "$VENV_DIR"
@@ -48,42 +47,43 @@ if ! wait_for_server; then
     printf '%s\n' "Server is not ready yet; wrappers will use their bounded registration retry."
 fi
 
-pid_file_is_live() {
-    pid_file=$1
-    [ -r "$pid_file" ] || return 1
-    IFS= read -r wrapper_pid < "$pid_file" || return 1
-    case "$wrapper_pid" in
-        ''|*[!0-9]*) return 1 ;;
-    esac
-    kill -0 "$wrapper_pid" 2>/dev/null
+wrapper_owner_is_live() {
+    owner_window=$1
+    owner_state=$(
+        tmux display-message -p \
+            -t "$SERVER_SESSION:$owner_window" '#{pane_dead}' 2>/dev/null
+    ) || return 1
+    [ "$owner_state" = "0" ]
 }
 
 start_wrapper() {
     identity=$1
     role=$2
     session="agentchattr-$identity"
-    pid_file="$PID_DIR/$identity.pid"
+    owner_window="wrapper-$identity"
     log_file="$LOG_DIR/$identity.redacted.log"
 
-    if tmux has-session -t "$session" 2>/dev/null; then
-        printf 'Skipping %s; tmux session %s already exists.\n' "$role" "$session"
+    if wrapper_owner_is_live "$owner_window"; then
+        printf 'Skipping %s; wrapper owner %s is still running.\n' \
+            "$role" "$SERVER_SESSION:$owner_window"
         return
     fi
-    if pid_file_is_live "$pid_file"; then
-        printf 'Skipping %s; wrapper PID is still running.\n' "$role"
-        return
+
+    if tmux has-session -t "$session" 2>/dev/null; then
+        tmux kill-session -t "$session"
     fi
 
     printf '%s\n' "Wrapper started; runtime output is suppressed to protect credentials." >"$log_file"
     if [ "$identity" = "gemini-video" ] && [ -n "${TEAM_UP_GEMINI_MODEL:-}" ]; then
-        nohup "$PYTHON" "$REPO_DIR/wrapper.py" "$identity" \
+        tmux new-window -d -t "$SERVER_SESSION" -n "$owner_window" \
+            -c "$REPO_DIR" "$PYTHON" "$REPO_DIR/wrapper.py" "$identity" \
             --cwd "$PROJECT_DIR" --role "$role" \
-            --model "$TEAM_UP_GEMINI_MODEL" >/dev/null 2>&1 &
+            --model "$TEAM_UP_GEMINI_MODEL"
     else
-        nohup "$PYTHON" "$REPO_DIR/wrapper.py" "$identity" \
-            --cwd "$PROJECT_DIR" --role "$role" >/dev/null 2>&1 &
+        tmux new-window -d -t "$SERVER_SESSION" -n "$owner_window" \
+            -c "$REPO_DIR" "$PYTHON" "$REPO_DIR/wrapper.py" "$identity" \
+            --cwd "$PROJECT_DIR" --role "$role"
     fi
-    printf '%s\n' "$!" >"$pid_file"
 }
 
 start_wrapper "claude-lead" "Lead"

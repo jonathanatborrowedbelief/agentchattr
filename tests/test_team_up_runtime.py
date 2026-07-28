@@ -1,10 +1,9 @@
 import os
+import shlex
 import shutil
-import signal
 import subprocess
 import tempfile
 import threading
-import time
 import unittest
 from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -353,53 +352,196 @@ class TeamUpRuntimeTests(unittest.TestCase):
             "Bearer opaque-test-token",
         )
 
-    def test_launcher_skips_a_live_wrapper_pid_when_tmux_is_not_ready(self):
+    def _make_wrapper_launcher_fixture(
+        self,
+        root: Path,
+        initial_tmux_targets: tuple[str, ...] = (),
+    ):
         source_script = Path(__file__).parents[1] / "macos-linux" / "start_team_up.sh"
 
+        repo = root / "repo"
+        script_dir = repo / "macos-linux"
+        script_dir.mkdir(parents=True)
+        script = script_dir / "start_team_up.sh"
+        shutil.copy2(source_script, script)
+        (repo / "requirements.txt").write_text("", encoding="utf-8")
+        python = repo / ".venv" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        python.chmod(0o755)
+        project = root / "project"
+        project.mkdir()
+
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        (fake_bin / "lsof").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (fake_bin / "nohup").write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$*\" >> \"$TEAM_UP_NOHUP_LOG\"\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "tmux").write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$*\" >> \"$TEAM_UP_TMUX_LOG\"\n"
+            "tmux_command=$1\n"
+            "shift\n"
+            "target=\n"
+            "window=\n"
+            "while [ \"$#\" -gt 0 ]; do\n"
+            "    case \"$1\" in\n"
+            "        -t) shift; target=$1 ;;\n"
+            "        -n) shift; window=$1 ;;\n"
+            "    esac\n"
+            "    shift\n"
+            "done\n"
+            "case \"$tmux_command\" in\n"
+            "    has-session)\n"
+            "        grep -Fqx \"$target\" \"$TEAM_UP_TMUX_STATE\"\n"
+            "        ;;\n"
+            "    display-message)\n"
+            "        if grep -Fqx \"$target\" \"$TEAM_UP_TMUX_STATE\"; then\n"
+            "            printf '0\\n'\n"
+            "        else\n"
+            "            exit 1\n"
+            "        fi\n"
+            "        ;;\n"
+            "    new-window)\n"
+            "        printf '%s:%s\\n' \"$target\" \"$window\" >> \"$TEAM_UP_TMUX_STATE\"\n"
+            "        ;;\n"
+            "    kill-session)\n"
+            "        awk -v target=\"$target\" '$0 != target' \"$TEAM_UP_TMUX_STATE\" > \"$TEAM_UP_TMUX_STATE.tmp\"\n"
+            "        mv \"$TEAM_UP_TMUX_STATE.tmp\" \"$TEAM_UP_TMUX_STATE\"\n"
+            "        ;;\n"
+            "    *) exit 0 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        for executable in fake_bin.iterdir():
+            executable.chmod(0o755)
+
+        tmux_state = root / "tmux.state"
+        tmux_state.write_text(
+            "".join(f"{target}\n" for target in initial_tmux_targets),
+            encoding="utf-8",
+        )
+        tmux_log = root / "tmux.log"
+        nohup_log = root / "nohup.log"
+        env = {
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "TEAM_UP_TMUX_STATE": str(tmux_state),
+            "TEAM_UP_TMUX_LOG": str(tmux_log),
+            "TEAM_UP_NOHUP_LOG": str(nohup_log),
+        }
+        return script, project, env, tmux_state, tmux_log, nohup_log
+
+    def test_launcher_owns_wrappers_in_server_tmux_windows(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
-            repo = root / "repo"
-            script_dir = repo / "macos-linux"
-            script_dir.mkdir(parents=True)
-            script = script_dir / "start_team_up.sh"
-            shutil.copy2(source_script, script)
-            (repo / "requirements.txt").write_text("", encoding="utf-8")
-            python = repo / ".venv" / "bin" / "python"
-            python.parent.mkdir(parents=True)
-            python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            python.chmod(0o755)
-            project = root / "project"
-            project.mkdir()
-
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
-            (fake_bin / "lsof").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            (fake_bin / "tmux").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-            (fake_bin / "nohup").write_text(
-                "#!/bin/sh\nexec sleep 30\n",
-                encoding="utf-8",
+            script, project, env, tmux_state, _, nohup_log = (
+                self._make_wrapper_launcher_fixture(
+                    root,
+                    initial_tmux_targets=("agentchattr-team-up-server",),
+                )
             )
-            for executable in fake_bin.iterdir():
-                executable.chmod(0o755)
 
-            env = {
-                **os.environ,
-                "PATH": f"{fake_bin}:{os.environ['PATH']}",
-            }
-            started_pids: list[int] = []
-            try:
-                subprocess.run(["sh", str(script), str(project)], check=True, env=env, capture_output=True, text=True)
-                first_pids = {path.name: path.read_text("utf-8") for path in (repo / ".pids").glob("*.pid")}
-                started_pids = [int(pid) for pid in first_pids.values()]
-                subprocess.run(["sh", str(script), str(project)], check=True, env=env, capture_output=True, text=True)
-                second_pids = {path.name: path.read_text("utf-8") for path in (repo / ".pids").glob("*.pid")}
-                self.assertEqual(second_pids, first_pids)
-            finally:
-                for pid in started_pids:
-                    try:
-                        os.kill(pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
+            subprocess.run(
+                ["sh", str(script), str(project)],
+                check=True,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(
+                set(tmux_state.read_text("utf-8").splitlines()),
+                {
+                    "agentchattr-team-up-server",
+                    "agentchattr-team-up-server:wrapper-claude-lead",
+                    "agentchattr-team-up-server:wrapper-gemini-video",
+                    "agentchattr-team-up-server:wrapper-codex-sol",
+                    "agentchattr-team-up-server:wrapper-codex-terra",
+                    "agentchattr-team-up-server:wrapper-codex-luna",
+                },
+            )
+            self.assertFalse(nohup_log.exists())
+
+    def test_launcher_rerun_keeps_one_tmux_owner_per_wrapper(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            script, project, env, _, tmux_log, _ = (
+                self._make_wrapper_launcher_fixture(
+                    root,
+                    initial_tmux_targets=("agentchattr-team-up-server",),
+                )
+            )
+
+            subprocess.run(
+                ["sh", str(script), str(project)],
+                check=True,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["sh", str(script), str(project)],
+                check=True,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            owner_starts = [
+                command
+                for command in tmux_log.read_text("utf-8").splitlines()
+                if command.startswith(
+                    "new-window -d -t agentchattr-team-up-server "
+                )
+            ]
+            self.assertEqual(len(owner_starts), 5)
+
+    def test_launcher_replaces_stale_visible_session_before_restarting_wrapper(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            script, project, env, tmux_state, tmux_log, _ = (
+                self._make_wrapper_launcher_fixture(
+                    root,
+                    initial_tmux_targets=(
+                        "agentchattr-team-up-server",
+                        "agentchattr-codex-luna",
+                    ),
+                )
+            )
+
+            subprocess.run(
+                ["sh", str(script), str(project)],
+                check=True,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            commands = tmux_log.read_text("utf-8").splitlines()
+            self.assertIn(
+                "kill-session -t agentchattr-codex-luna",
+                commands,
+            )
+            kill_index = commands.index(
+                "kill-session -t agentchattr-codex-luna"
+            )
+            restart_index = next(
+                index
+                for index, command in enumerate(commands)
+                if command.startswith(
+                    "new-window -d -t agentchattr-team-up-server "
+                    "-n wrapper-codex-luna "
+                )
+            )
+            self.assertLess(kill_index, restart_index)
+            self.assertNotIn(
+                "agentchattr-codex-luna",
+                tmux_state.read_text("utf-8").splitlines(),
+            )
 
     def test_launcher_does_not_persist_raw_server_output(self):
         source_script = Path(__file__).parents[1] / "macos-linux" / "start_team_up.sh"
@@ -530,10 +672,7 @@ class TeamUpRuntimeTests(unittest.TestCase):
             (repo / "requirements.txt").write_text("", encoding="utf-8")
             python = repo / ".venv" / "bin" / "python"
             python.parent.mkdir(parents=True)
-            python.write_text(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TEAM_UP_PYTHON_LOG\"\n",
-                encoding="utf-8",
-            )
+            python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             python.chmod(0o755)
             project = root / "project"
             project.mkdir()
@@ -541,16 +680,22 @@ class TeamUpRuntimeTests(unittest.TestCase):
             fake_bin = root / "bin"
             fake_bin.mkdir()
             (fake_bin / "lsof").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            (fake_bin / "tmux").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            (fake_bin / "tmux").write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"$TEAM_UP_TMUX_LOG\"\n"
+                "case \"$1\" in has-session) exit 1 ;; esac\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
             for executable in fake_bin.iterdir():
                 executable.chmod(0o755)
 
-            python_log = root / "python.log"
+            tmux_log = root / "tmux.log"
             env = {
                 **os.environ,
                 "PATH": f"{fake_bin}:{os.environ['PATH']}",
                 "TEAM_UP_GEMINI_MODEL": "gemini-2.5-flash",
-                "TEAM_UP_PYTHON_LOG": str(python_log),
+                "TEAM_UP_TMUX_LOG": str(tmux_log),
             }
             subprocess.run(
                 ["sh", str(script), str(project)],
@@ -559,22 +704,31 @@ class TeamUpRuntimeTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            for _ in range(20):
-                if python_log.exists() and len(python_log.read_text("utf-8").splitlines()) == 5:
-                    break
-                time.sleep(0.01)
 
-            invocations = python_log.read_text("utf-8").splitlines()
+            invocations = [
+                command
+                for command in tmux_log.read_text("utf-8").splitlines()
+                if command.startswith(
+                    "new-window -d -t agentchattr-team-up-server "
+                )
+            ]
             gemini_invocation = next(
                 invocation for invocation in invocations
-                if "wrapper.py gemini-video " in invocation
+                if "wrapper.py" in invocation and "gemini-video" in invocation
             )
             other_invocations = [
                 invocation for invocation in invocations
-                if "wrapper.py gemini-video " not in invocation
+                if invocation != gemini_invocation
             ]
-            self.assertIn("--model gemini-2.5-flash", gemini_invocation)
-            self.assertTrue(all("--model" not in invocation for invocation in other_invocations))
+            gemini_args = shlex.split(gemini_invocation)
+            model_index = gemini_args.index("--model")
+            self.assertEqual(gemini_args[model_index + 1], "gemini-2.5-flash")
+            self.assertTrue(
+                all(
+                    "--model" not in shlex.split(invocation)
+                    for invocation in other_invocations
+                )
+            )
 
     def test_server_startup_output_does_not_print_session_token(self):
         import app
