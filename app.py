@@ -1586,18 +1586,15 @@ async def get_status():
 
 @app.get("/healthz")
 async def team_up_health():
-    available = {
-        name
-        for name in TEAM_UP_IDENTITIES
-        if agents is not None and agents.is_available(name)
-    }
-    active_team_up = set(available)
+    from mcp_bridge import is_online
+
+    active_team_up = set()
     if registry is not None:
         for name in registry.get_active_names():
             if any(
                 name == base or name.startswith(f"{base}-")
                 for base in TEAM_UP_IDENTITIES
-            ):
+            ) and is_online(name):
                 active_team_up.add(name)
     expected = set(TEAM_UP_IDENTITIES)
     return {

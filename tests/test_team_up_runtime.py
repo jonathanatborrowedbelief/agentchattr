@@ -445,6 +445,7 @@ class TeamUpRuntimeTests(unittest.TestCase):
     def test_team_up_health_reports_exact_ready_cast(self):
         import asyncio
         import app
+        import mcp_bridge
 
         expected = {
             "claude-lead",
@@ -453,15 +454,16 @@ class TeamUpRuntimeTests(unittest.TestCase):
             "codex-terra",
             "codex-luna",
         }
-        fake_agents = SimpleNamespace(
-            is_available=lambda name: name in expected
-        )
         exact_registry = SimpleNamespace(
             get_active_names=lambda: sorted(expected)
         )
         with (
-            mock.patch.object(app, "agents", fake_agents),
             mock.patch.object(app, "registry", exact_registry),
+            mock.patch.object(
+                mcp_bridge,
+                "is_online",
+                side_effect=lambda name: name in expected,
+            ),
         ):
             payload = asyncio.run(app.team_up_health())
 
@@ -473,11 +475,66 @@ class TeamUpRuntimeTests(unittest.TestCase):
             get_active_names=lambda: [*sorted(expected), "gemini-video-2"]
         )
         with (
-            mock.patch.object(app, "agents", fake_agents),
             mock.patch.object(app, "registry", suffixed_registry),
+            mock.patch.object(mcp_bridge, "is_online", return_value=True),
         ):
             payload = asyncio.run(app.team_up_health())
         self.assertFalse(payload["ready"])
+
+        with (
+            mock.patch.object(app, "registry", exact_registry),
+            mock.patch.object(
+                mcp_bridge,
+                "is_online",
+                side_effect=lambda name: name != "codex-luna",
+            ),
+        ):
+            payload = asyncio.run(app.team_up_health())
+        self.assertFalse(payload["ready"])
+
+    def test_queue_lock_serializes_append_and_claim(self):
+        import threading
+
+        from agents import AgentTrigger
+        from queue_io import queue_lock
+        from wrapper import _claim_queue_batch
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            queue_file = Path(temporary_dir) / "codex-sol_queue.jsonl"
+            entered = threading.Event()
+            release = threading.Event()
+            claimed = []
+
+            def hold_producer_lock():
+                with queue_lock(queue_file):
+                    with open(queue_file, "a", encoding="utf-8") as stream:
+                        entered.set()
+                        release.wait(timeout=2)
+                        stream.write('{"prompt":"LOCKED"}\n')
+
+            producer = threading.Thread(target=hold_producer_lock)
+            producer.start()
+            self.assertTrue(entered.wait(timeout=1))
+
+            consumer = threading.Thread(
+                target=lambda: claimed.append(_claim_queue_batch(queue_file))
+            )
+            consumer.start()
+            consumer.join(timeout=0.05)
+            self.assertTrue(consumer.is_alive())
+
+            release.set()
+            producer.join(timeout=1)
+            consumer.join(timeout=1)
+            self.assertFalse(consumer.is_alive())
+            self.assertIn("LOCKED", claimed[0].read_text("utf-8"))
+
+            next_queue = Path(temporary_dir) / "next_queue.jsonl"
+            AgentTrigger._append_queue_entry(
+                next_queue,
+                {"prompt": "APPENDED"},
+            )
+            self.assertIn("APPENDED", next_queue.read_text("utf-8"))
 
     def test_role_instructions_use_control_root_and_reach_each_trigger(self):
         import wrapper

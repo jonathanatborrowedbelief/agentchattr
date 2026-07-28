@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 from agent_activity import AgentActivityStore
+from queue_io import queue_lock
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +23,12 @@ class AgentTrigger:
 
     def is_available(self, name: str) -> bool:
         return self._registry.is_registered(name)
+
+    @staticmethod
+    def _append_queue_entry(queue_file: Path, entry: dict) -> None:
+        with queue_lock(queue_file):
+            with open(queue_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
 
     def get_status(self) -> dict:
         from mcp_bridge import get_role, is_active, is_online
@@ -58,8 +65,7 @@ class AgentTrigger:
         if job_id is not None:
             entry["job_id"] = job_id
 
-        with open(queue_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+        self._append_queue_entry(queue_file, entry)
 
         self._activity.mark_queued(agent_name, channel=channel, job_id=job_id or 0)
         log.info("Queued @%s trigger (ch=%s, job=%s)", agent_name, channel, job_id)
@@ -83,8 +89,7 @@ class AgentTrigger:
         if job_id is not None:
             entry["job_id"] = job_id
 
-        with open(queue_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+        self._append_queue_entry(queue_file, entry)
 
         self._activity.mark_queued(agent_name, channel=channel, job_id=job_id or 0)
         log.info("Queued @%s trigger (ch=%s, job=%s)", agent_name, channel, job_id)

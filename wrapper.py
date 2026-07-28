@@ -26,6 +26,8 @@ import threading
 import time
 from pathlib import Path
 
+from queue_io import queue_lock
+
 ROOT = Path(__file__).parent
 
 SERVER_NAME = "agentchattr"
@@ -635,10 +637,11 @@ def _claim_queue_batch(queue_file: Path) -> Path | None:
     inflight = Path(f"{queue_file}.inflight")
     if inflight.exists():
         return inflight
-    try:
-        os.replace(queue_file, inflight)
-    except FileNotFoundError:
-        return None
+    with queue_lock(queue_file):
+        try:
+            os.replace(queue_file, inflight)
+        except FileNotFoundError:
+            return None
     return inflight
 
 
