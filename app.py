@@ -163,19 +163,19 @@ def _load_settings():
         except Exception:
             pass
     seen = set()
-    user_channels = []
+    channels = []
     for channel in room_settings.get("channels", []):
         if not isinstance(channel, str) or channel in seen:
             continue
         seen.add(channel)
-        if channel in ("general", StartupCanary.PRIVATE_CHANNEL, *PROTECTED_OPERATIONAL_CHANNELS):
+        if channel == StartupCanary.PRIVATE_CHANNEL:
             continue
-        user_channels.append(channel)
+        channels.append(channel)
 
-    user_limit = MAX_CHANNELS - 1 - len(PROTECTED_OPERATIONAL_CHANNELS)
+    user_channels = [channel for channel in channels if channel not in ("general", *PROTECTED_OPERATIONAL_CHANNELS)]
     room_settings["channels"] = [
         "general",
-        *user_channels[:user_limit],
+        *user_channels,
         *PROTECTED_OPERATIONAL_CHANNELS,
     ]
     _save_settings()
@@ -1438,7 +1438,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
                 if name in room_settings["channels"]:
                     continue
-                if len(room_settings["channels"]) >= MAX_CHANNELS:
+                user_channels = [
+                    channel for channel in room_settings["channels"]
+                    if channel not in ("general", *PROTECTED_OPERATIONAL_CHANNELS)
+                ]
+                if len(user_channels) >= MAX_CHANNELS:
                     continue
                 room_settings["channels"].append(name)
                 _save_settings()
@@ -1606,7 +1610,11 @@ async def import_history(file: UploadFile = File(...)):
             status_code=400,
         )
     channel_list = list(room_settings.get("channels", ["general"]))
-    max_ch = room_settings.get("max_channels", 8)
+    user_channel_count = sum(
+        channel not in ("general", *PROTECTED_OPERATIONAL_CHANNELS)
+        for channel in channel_list
+    )
+    max_ch = len(channel_list) + max(0, MAX_CHANNELS - user_channel_count)
     report = _archive.import_archive(
         content, store, jobs, rules, summaries,
         channel_list, max_channels=max_ch,
@@ -2628,10 +2636,10 @@ async def start_session(request: Request):
                 {"error": "not enough agents online to fill all roles"},
                 status_code=400,
             )
-        for role in tmpl.get("human_roles", []):
-            human = tmpl.get("default_cast", {}).get(role)
-            if human:
-                cast[role] = human
+    for role in tmpl.get("human_roles", []):
+        human = tmpl.get("default_cast", {}).get(role)
+        if human:
+            cast[role] = human
 
     session = session_engine.start_session(
         template_id,
@@ -2697,7 +2705,7 @@ async def request_session_draft(request: Request):
         '{"name": "...", "description": "...", "roles": ["role1", "role2", ...], '
         '"phases": [{"name": "...", "participants": ["role1"], "prompt": "...", "is_output": false}, ...]}\n'
         "```\n"
-        "Rules: max 6 roles, max 6 phases, max 4 participants per phase, max 200 chars per prompt. "
+        "Rules: max 6 roles, max 7 phases, max 4 participants per phase, max 200 chars per prompt. "
         "Mark exactly one phase as `is_output: true` (the final deliverable). "
         f"Keep it focused and sequential. Use the chat_send tool to post your response in the #{channel} channel. "
         "Do NOT respond only in your terminal.",

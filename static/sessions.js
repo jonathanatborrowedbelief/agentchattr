@@ -336,13 +336,18 @@ function _getAvailableAgents() {
         .map(([name]) => name);
 }
 
-function _autoCast(roles, agents, defaultCast = {}) {
+function _autoCast(roles, agents, defaultCast = {}, humanRoles = []) {
     const cast = {};
     const used = new Set();
+    const humanRoleSet = new Set(humanRoles);
+
+    for (const role of humanRoleSet) {
+        if (defaultCast[role]) cast[role] = defaultCast[role];
+    }
 
     for (const role of roles) {
         const preferred = defaultCast[role];
-        if (agents.includes(preferred) && !used.has(preferred)) {
+        if (!humanRoleSet.has(role) && agents.includes(preferred) && !used.has(preferred)) {
             cast[role] = preferred;
             used.add(preferred);
         }
@@ -382,30 +387,29 @@ function syncSessionCastRole(selectEl) {
 
 function buildSessionCastEditor(tmpl, cast, assignees) {
     const phases = tmpl.phases || [];
-    if (!phases.length) {
-        return (tmpl.roles || []).map(role => {
-            const assigned = cast ? cast[role] : '';
-            const options = assignees.map(a =>
-                `<option value="${window.escapeHtml(a)}" ${a === assigned ? 'selected' : ''}>${window.escapeHtml(a)}</option>`
-            ).join('');
+    const humanRoleSet = new Set(tmpl.human_roles || []);
+    const renderRole = (role) => {
+        const assigned = cast ? cast[role] : '';
+        if (humanRoleSet.has(role)) {
             return `<div class="session-cast-row">
                 <span class="session-cast-role">${window.escapeHtml(role)}</span>
-                <select class="session-cast-select" data-role="${window.escapeHtml(role)}" onchange="syncSessionCastRole(this)">${options}</select>
+                <span class="session-cast-human">${window.escapeHtml(assigned || tmpl.default_cast?.[role] || '')}</span>
             </div>`;
-        }).join('');
+        }
+        const options = assignees.map(a =>
+            `<option value="${window.escapeHtml(a)}" ${a === assigned ? 'selected' : ''}>${window.escapeHtml(a)}</option>`
+        ).join('');
+        return `<div class="session-cast-row">
+            <span class="session-cast-role">${window.escapeHtml(role)}</span>
+            <select class="session-cast-select" data-role="${window.escapeHtml(role)}" onchange="syncSessionCastRole(this)">${options}</select>
+        </div>`;
+    };
+    if (!phases.length) {
+        return (tmpl.roles || []).map(renderRole).join('');
     }
 
     return phases.map((phase, idx) => {
-        const participantRows = (phase.participants || []).map(role => {
-            const assigned = cast ? cast[role] : '';
-            const options = assignees.map(a =>
-                `<option value="${window.escapeHtml(a)}" ${a === assigned ? 'selected' : ''}>${window.escapeHtml(a)}</option>`
-            ).join('');
-            return `<div class="session-cast-row">
-                <span class="session-cast-role">${window.escapeHtml(role)}</span>
-                <select class="session-cast-select" data-role="${window.escapeHtml(role)}" onchange="syncSessionCastRole(this)">${options}</select>
-            </div>`;
-        }).join('');
+        const participantRows = (phase.participants || []).map(renderRole).join('');
 
         return `<div class="session-cast-phase">
             <div class="session-cast-phase-head">
@@ -497,7 +501,7 @@ function showCastPreview(templateId) {
     if (!tmpl) return;
 
     const agents = _getAvailableAgents();
-    const cast = _autoCast(tmpl.roles || [], agents, tmpl.default_cast || {});
+    const cast = _autoCast(tmpl.roles || [], agents, tmpl.default_cast || {}, tmpl.human_roles || []);
 
     // All possible assignees: agents + "user" (self) + "none" (skip)
     const assignees = [...agents, window.username];
@@ -537,6 +541,7 @@ async function launchSessionWithCast(templateId) {
     document.querySelectorAll('#session-step-cast .session-cast-select').forEach(sel => {
         cast[sel.dataset.role] = sel.value;
     });
+    const tmpl = sessionTemplates.find(t => t.id === templateId);
 
     const modal = document.getElementById('session-launcher-modal');
     if (modal) modal.remove();
@@ -547,7 +552,7 @@ async function launchSessionWithCast(templateId) {
             headers: { 'Content-Type': 'application/json', 'X-Session-Token': window.SESSION_TOKEN },
             body: JSON.stringify({
                 template_id: templateId,
-                channel: window.activeChannel,
+                channel: tmpl?.default_channel || window.activeChannel,
                 cast: cast,
                 goal: goal,
                 started_by: window.username,
@@ -673,7 +678,7 @@ function runDraft(msgId) {
 
 function showDraftCastPreview(tmpl, draftMsgId) {
     const agents = _getAvailableAgents();
-    const cast = _autoCast(tmpl.roles || [], agents, tmpl.default_cast || {});
+    const cast = _autoCast(tmpl.roles || [], agents, tmpl.default_cast || {}, tmpl.human_roles || []);
     const assignees = [...agents, window.username];
 
     let existing = document.getElementById('session-launcher-modal');

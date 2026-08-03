@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,11 +25,13 @@ DEFAULT_CAST = {
 class _Messages:
     def __init__(self):
         self.callbacks = []
+        self.added = []
 
     def on_message(self, callback):
         self.callbacks.append(callback)
 
     def add(self, *args, **kwargs):
+        self.added.append((args, kwargs))
         return None
 
 
@@ -46,6 +49,9 @@ class _Registry:
 
     def is_registered(self, name):
         return name in self.names
+
+    def get_active_names(self):
+        return list(self.names)
 
 
 class _Request:
@@ -187,6 +193,35 @@ class SocialWorkflowSettingsTests(unittest.TestCase):
                 self.assertEqual(app.room_settings["channels"], ["general", "client-work", "video-lab", "publish-queue"])
                 self.assertEqual(len(app.room_settings["channels"]), 4)
 
+    def test_load_settings_keeps_a_legacy_full_user_channel_list(self):
+        defaults = {
+            "title": "agentchattr",
+            "username": "user",
+            "font": "sans",
+            "channels": ["general"],
+            "history_limit": "all",
+            "contrast": "normal",
+            "custom_roles": [],
+        }
+        users = [f"client-{index}" for index in range(1, 9)]
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            Path(temporary_dir, "settings.json").write_text(
+                json.dumps({"channels": ["general", *users]}), encoding="utf-8"
+            )
+            with mock.patch.object(app, "config", {"server": {"data_dir": temporary_dir}}), mock.patch.object(app, "room_settings", dict(defaults)):
+                app._load_settings()
+
+                self.assertEqual(
+                    app.room_settings["channels"],
+                    ["general", *users, "video-lab", "publish-queue"],
+                )
+                app.room_settings = dict(defaults)
+                app._load_settings()
+                self.assertEqual(
+                    app.room_settings["channels"],
+                    ["general", *users, "video-lab", "publish-queue"],
+                )
+
 
 class SocialWorkflowEngineTests(unittest.TestCase):
     def test_video_lab_advances_all_seven_phases_to_release(self):
@@ -261,6 +296,40 @@ class SocialWorkflowEngineTests(unittest.TestCase):
             self.assertEqual(advanced["current_phase"], 4)
             self.assertEqual(advanced["waiting_on"], "codex-terra")
 
+    def test_api_forces_human_approver_and_waits_without_a_trigger(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            sessions = SessionStore(
+                str(Path(temporary_dir) / "session_runs.json"),
+                templates_dir=str(TEMPLATES_DIR),
+            )
+            messages = _Messages()
+            trigger = _Trigger()
+            registry = _Registry(DEFAULT_CAST.values())
+            engine = SessionEngine(sessions, messages, trigger, registry=registry)
+            requested_cast = {**DEFAULT_CAST, "approver": "claude-lead"}
+
+            with mock.patch.multiple(
+                app,
+                session_store=sessions,
+                session_engine=engine,
+                registry=registry,
+                store=messages,
+            ):
+                response = __import__("asyncio").run(
+                    app.start_session(_Request({
+                        "template_id": "publish-queue",
+                        "cast": requested_cast,
+                    }))
+                )
+
+            session_id = json.loads(response.body)["id"]
+            persisted = sessions.get(session_id)
+            self.assertEqual(persisted["cast"]["approver"], "Jonathan")
+            for message_id in range(1, 4):
+                engine._advance_current(sessions.get(session_id), message_id)
+            self.assertEqual(sessions.get(session_id)["waiting_on"], "Jonathan")
+            self.assertEqual(len(trigger.calls), 3)
+
 
 class SocialWorkflowStartApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_preserves_the_publish_template_human_approver(self):
@@ -293,3 +362,55 @@ class SocialWorkflowStartApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(engine.started["channel"], "video-lab")
         self.assertEqual(engine.started["lease_key"], "team-up-shared-cast")
+
+
+class SocialWorkflowFrontendTests(unittest.TestCase):
+    def test_launcher_uses_template_channel_and_renders_human_role_as_fixed(self):
+        script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const requests = [];
+const nodes = {
+  'session-goal-input': {value: 'Ship it'},
+  'session-launcher-modal': {remove() {}},
+};
+const context = {
+  window: {activeChannel: 'general', username: 'user', SESSION_TOKEN: '', _messageRenderers: {}, escapeHtml: value => value},
+  document: {
+    getElementById(id) { return nodes[id] || null; },
+    querySelectorAll() { return []; },
+  },
+  fetch: async (url, options) => { requests.push({url, body: JSON.parse(options.body)}); return {ok: true, json: async () => ({})}; },
+  alert() {}, console, WebSocket: {OPEN: 1}, Hub: {on() {}}, Store: {watch() {}}, setTimeout, clearTimeout,
+};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), context);
+vm.runInContext(`sessionTemplates = [{id: 'publish-queue', default_channel: 'publish-queue', human_roles: ['approver'], default_cast: {approver: 'Jonathan'}, phases: [{name: 'Human Approval', participants: ['approver']}]}];`, context);
+const editor = vm.runInContext(`buildSessionCastEditor(sessionTemplates[0], {approver: 'Jonathan'}, ['claude-lead'])`, context);
+vm.runInContext(`launchSessionWithCast('publish-queue')`, context).then(() => {
+  process.stdout.write(JSON.stringify({editor, body: requests[0].body}));
+});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(ROOT / "static" / "sessions.js")],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        rendered = json.loads(result.stdout)
+
+        self.assertEqual(rendered["body"]["channel"], "publish-queue")
+        self.assertIn("Jonathan", rendered["editor"])
+        self.assertNotIn('data-role="approver"', rendered["editor"])
+
+
+class SessionDesignPromptTests(unittest.IsolatedAsyncioTestCase):
+    async def test_design_request_advertises_seven_phase_contract(self):
+        messages = _Messages()
+        with mock.patch.object(app, "store", messages):
+            response = await app.request_session_draft(
+                _Request({"agent": "codex-sol", "description": "Review launch readiness"})
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("max 7 phases", messages.added[1][0][1])

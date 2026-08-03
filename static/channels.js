@@ -10,6 +10,12 @@
 const _channelScrollMsg = {};  // channel name -> message ID at top of viewport
 const _protectedOperationalChannels = new Set(['video-lab', 'publish-queue']);
 
+function _userCreatedChannelCount() {
+    return (window.channelList || []).filter(name =>
+        name !== 'general' && !_protectedOperationalChannels.has(name)
+    ).length;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -56,7 +62,7 @@ function renderChannelTabs() {
     // Update add button disabled state
     const addBtn = document.getElementById('channel-sidebar-add');
     if (addBtn) {
-        addBtn.classList.toggle('disabled', window.channelList.length >= 8);
+        addBtn.classList.toggle('disabled', _userCreatedChannelCount() >= 8);
     }
 }
 
@@ -201,7 +207,7 @@ function filterMessagesByChannel() {
 // ---------------------------------------------------------------------------
 
 function showChannelCreateDialog() {
-    if (window.channelList.length >= 8) return;
+    if (_userCreatedChannelCount() >= 8) return;
 
     // Use sidebar list as the target
     const list = document.getElementById('channel-sidebar-list');
