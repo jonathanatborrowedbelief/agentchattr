@@ -91,6 +91,59 @@ class TeamUpRuntimeTests(unittest.TestCase):
                     {"dedicated_identity": True},
                 )
 
+    def test_dedicated_heartbeat_keeps_the_exact_identity_after_rename_attempts(self):
+        import app as app_module
+        from registry import RuntimeRegistry
+        from wrapper import _resolve_heartbeat_identity
+
+        class HeartbeatRequest:
+            def __init__(self, token: str):
+                self.headers = {"authorization": f"Bearer {token}"}
+
+            async def json(self):
+                raise ValueError("plain heartbeat")
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            registry = RuntimeRegistry(data_dir=temporary_dir)
+            registry.seed({"codex-sol": {"dedicated_identity": True}})
+            registered = registry.register("codex-sol")
+
+            self.assertEqual(
+                registry.claim("codex-sol", "codex-sol-2"),
+                "Dedicated identity must remain: codex-sol",
+            )
+            self.assertEqual(
+                registry.rename("codex-sol", "codex-sol-2"),
+                "Dedicated identity must remain: codex-sol",
+            )
+
+            with mock.patch.object(app_module, "registry", registry):
+                heartbeat = asyncio.run(
+                    app_module.heartbeat(
+                        "codex-sol",
+                        HeartbeatRequest(registered["token"]),
+                    )
+                )
+
+        payload = heartbeat
+        self.assertEqual(payload["name"], "codex-sol")
+        self.assertEqual(
+            _resolve_heartbeat_identity(
+                "codex-sol",
+                {"dedicated_identity": True},
+                "codex-sol",
+                payload,
+            ),
+            "codex-sol",
+        )
+        with self.assertRaisesRegex(RuntimeError, "codex-sol-2"):
+            _resolve_heartbeat_identity(
+                "codex-sol",
+                {"dedicated_identity": True},
+                "codex-sol",
+                {"name": "codex-sol-2"},
+            )
+
     def test_generic_multi_instance_registration_keeps_suffixes_and_reservations(self):
         from registry import RuntimeRegistry
 

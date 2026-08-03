@@ -260,6 +260,12 @@ class RuntimeRegistry:
 
             if not inst:
                 error = f"No available {sender} instance. Is a wrapper registered?"
+            elif (
+                self._bases.get(inst.base, {}).get("dedicated_identity")
+                and target_name is not None
+                and target_name != inst.name
+            ):
+                error = f"Dedicated identity must remain: {inst.base}"
             elif target_name is None or target_name == inst.name:
                 # Accept current name — but don't auto-activate pending instances.
                 # Pending instances must be named by human (lightbox) or reclaimed
@@ -340,6 +346,11 @@ class RuntimeRegistry:
             inst = self._instances.get(old_name)
             if not inst:
                 return f"Not found: {old_name}"
+            if (
+                self._bases.get(inst.base, {}).get("dedicated_identity")
+                and new_name != old_name
+            ):
+                return f"Dedicated identity must remain: {inst.base}"
 
             if new_name == old_name:
                 # Same identity — just update label

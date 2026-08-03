@@ -532,10 +532,7 @@ def _register_configured_identity(
 ) -> dict:
     """Register the configured identity without accepting a dedicated suffix."""
     registration = _register_instance(server_port, agent, label)
-    if agent_config.get("dedicated_identity") and registration.get("name") != agent:
-        raise RuntimeError(
-            f"dedicated identity {agent} registered as {registration.get('name')}"
-        )
+    _require_configured_identity(agent, agent_config, registration.get("name"))
     return registration
 
 
@@ -547,11 +544,31 @@ def _register_configured_identity_with_retry(
 ) -> dict:
     """Retry registration while preserving the configured dedicated identity."""
     registration = _register_instance_with_retry(server_port, agent, label)
-    if agent_config.get("dedicated_identity") and registration.get("name") != agent:
-        raise RuntimeError(
-            f"dedicated identity {agent} registered as {registration.get('name')}"
-        )
+    _require_configured_identity(agent, agent_config, registration.get("name"))
     return registration
+
+
+def _require_configured_identity(
+    agent: str,
+    agent_config: dict,
+    runtime_name: str | None,
+) -> str | None:
+    if agent_config.get("dedicated_identity") and runtime_name != agent:
+        raise RuntimeError(
+            f"dedicated identity {agent} received unexpected name {runtime_name}"
+        )
+    return runtime_name
+
+
+def _resolve_heartbeat_identity(
+    agent: str,
+    agent_config: dict,
+    current_name: str,
+    heartbeat_response: dict,
+) -> str:
+    """Validate the identity returned by a heartbeat before adopting it."""
+    server_name = heartbeat_response.get("name", current_name)
+    return _require_configured_identity(agent, agent_config, server_name) or current_name
 
 
 def _register_instance_with_retry(
@@ -972,6 +989,8 @@ def _run_main(cleanup: _RegistrationCleanup):
             pass
 
     def set_runtime_identity(new_name: str | None = None, new_token: str | None = None):
+        if new_name:
+            _require_configured_identity(agent, agent_cfg, new_name)
         with _identity_lock:
             old_name = _identity["name"]
             old_token = _identity["token"]
@@ -1084,7 +1103,12 @@ def _run_main(cleanup: _RegistrationCleanup):
                 )
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     resp_data = json.loads(resp.read())
-                server_name = resp_data.get("name", current_name)
+                server_name = _resolve_heartbeat_identity(
+                    agent,
+                    agent_cfg,
+                    current_name,
+                    resp_data,
+                )
                 if server_name != current_name:
                     set_runtime_identity(server_name)
             except urllib.error.HTTPError as exc:
