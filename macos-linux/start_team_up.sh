@@ -58,15 +58,72 @@ try:
         payload = json.load(response)
     valid = payload.get("service") == "agentchattr-team-up-v2"
     if mode == "agents":
+        canary = payload.get("canary", {})
+        canary_agents = canary.get("agents", {})
         valid = (
             valid
             and payload.get("ready") is True
             and set(payload.get("agents", [])) == expected
+            and canary.get("state") == "passed"
+            and canary.get("complete") is True
+            and set(canary_agents) == expected
+            and all(
+                item.get("state") == "passed"
+                for item in canary_agents.values()
+            )
         )
 except Exception:
     valid = False
 raise SystemExit(0 if valid else 1)
 ' "$mode" >/dev/null 2>&1
+}
+
+team_up_blocker() {
+    "$PYTHON" -c '
+import json
+import urllib.request
+
+identities = (
+    "claude-lead",
+    "gemini-video",
+    "codex-sol",
+    "codex-terra",
+    "codex-luna",
+)
+safe_reasons = {
+    "unknown_screen",
+    "update_dialog",
+    "trust_screen",
+    "mcp_startup_failure",
+    "tool_approval",
+    "provider_offline",
+    "awaiting_response",
+    "wrong_sender",
+    "nonce_mismatch",
+    "replayed_nonce",
+    "response_timeout",
+    "queue_delivery_failed",
+    "provider_unavailable",
+}
+with urllib.request.urlopen("http://127.0.0.1:8300/healthz", timeout=1) as response:
+    payload = json.load(response)
+agents = payload.get("agents", {})
+for identity in identities:
+    item = agents.get(identity, {})
+    if not item.get("online") or item.get("provider_state") != "provider_ready":
+        reason = item.get("reason_code", "provider_unavailable")
+        safe_reason = reason if reason in safe_reasons else "provider_unavailable"
+        print(f"{identity}: {safe_reason}")
+        raise SystemExit(0)
+canary_agents = payload.get("canary", {}).get("agents", {})
+for identity in identities:
+    item = canary_agents.get(identity, {})
+    if item.get("state") != "passed":
+        reason = item.get("reason", "provider_unavailable")
+        safe_reason = reason if reason in safe_reasons else "provider_unavailable"
+        print(f"{identity}: {safe_reason}")
+        raise SystemExit(0)
+' blocker
 }
 
 server_is_ready() {
@@ -192,7 +249,12 @@ start_wrapper "codex-terra" "Builder"
 start_wrapper "codex-luna" "Scout"
 
 if ! wait_for_team; then
-    printf '%s\n' "Team Up agents failed to register; runtime is not ready." >&2
+    blocker=$(team_up_blocker 2>/dev/null || true)
+    if [ -n "$blocker" ]; then
+        printf 'Team Up startup blocked: %s\n' "$blocker" >&2
+    else
+        printf '%s\n' "Team Up startup canary did not complete; runtime is not ready." >&2
+    fi
     exit 1
 fi
 

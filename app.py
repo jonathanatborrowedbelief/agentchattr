@@ -25,6 +25,7 @@ from registry import IdentityConflict, RuntimeRegistry
 from session_store import SessionStore, validate_session_template
 from session_engine import SessionEngine
 from agent_activity import AgentActivityStore
+from startup_canary import StartupCanary
 
 log = logging.getLogger(__name__)
 
@@ -49,11 +50,29 @@ registry: RuntimeRegistry | None = None
 session_store: SessionStore | None = None
 session_engine: SessionEngine | None = None
 activity_store: AgentActivityStore | None = None
+startup_canary: StartupCanary | None = None
 config: dict = {}
 ws_clients: set[WebSocket] = set()
 
 # --- Security: session token (set by configure()) ---
 session_token: str = ""
+
+
+def _startup_provider_status(identity: str) -> tuple[str, str]:
+    inst = registry.get_instance(identity) if registry is not None else None
+    if not inst:
+        return "offline", "provider_offline"
+    return (
+        inst.get("provider_state", "registered"),
+        inst.get("provider_reason_code", "unknown_screen"),
+    )
+
+
+def _reset_startup_canary() -> None:
+    global startup_canary
+    startup_canary = None
+    import mcp_bridge
+    mcp_bridge.startup_canary = None
 
 # Room settings (persisted to data/settings.json)
 room_settings: dict = {
@@ -142,6 +161,11 @@ def _load_settings():
             room_settings.update(saved)
         except Exception:
             pass
+    room_settings["channels"] = [
+        channel
+        for channel in room_settings.get("channels", [])
+        if channel != StartupCanary.PRIVATE_CHANNEL
+    ]
     # Ensure "general" always exists and is first
     if "channels" not in room_settings or not room_settings["channels"]:
         room_settings["channels"] = ["general"]
@@ -249,7 +273,7 @@ def _install_security_middleware(token: str, cfg: dict):
 
 def configure(cfg: dict, session_token: str = ""):
     global store, rules, summaries, jobs, schedules, router, agents, registry
-    global session_store, session_engine, activity_store, config
+    global session_store, session_engine, activity_store, startup_canary, config
     config = cfg
     # --- Security: store the session token and install middleware ---
     _install_security_middleware(session_token, cfg)
@@ -307,6 +331,7 @@ def configure(cfg: dict, session_token: str = ""):
     )
     activity_store = AgentActivityStore()
     agents = AgentTrigger(registry, data_dir=data_dir, activity_store=activity_store)
+    _reset_startup_canary()
 
     # Sessions
     ROOT = Path(__file__).parent
@@ -688,6 +713,10 @@ async def _handle_new_message(msg: dict):
     msg_type = msg.get("type", "chat")
     sender = msg.get("sender", "")
     channel = msg.get("channel", "general")
+    if channel == StartupCanary.PRIVATE_CHANNEL:
+        if msg.get("id"):
+            store.delete([msg["id"]])
+        return
     # Strip @mentions to find the slash command (e.g. "@claude @codex /hatmaking")
     stripped = _re.sub(r"@[\w-]+\s*", "", text).strip().lower()
     _broadcast_cmds = ("/hatmaking", "/artchallenge", "/roastreview", "/poetry")
@@ -893,6 +922,8 @@ async def _broadcast(raw_json: str):
 
 
 async def broadcast(msg: dict):
+    if msg.get("channel", "general") == StartupCanary.PRIVATE_CHANNEL:
+        return
     data = json.dumps({"type": "message", "data": msg})
     dead = set()
     for client in list(ws_clients):
@@ -1129,6 +1160,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 attachments = event.get("attachments", [])
                 sender = event.get("sender") or room_settings.get("username", "user")
                 channel = event.get("channel", "general")
+
+                if channel == StartupCanary.PRIVATE_CHANNEL:
+                    continue
 
                 if not text and not attachments:
                     continue
@@ -1504,6 +1538,48 @@ async def export_history():
     )
 
 
+def _archive_contains_private_canary_data(
+    content: bytes,
+    max_uncompressed_bytes: int,
+) -> bool:
+    """Reject archives that could remap the reserved channel into public history."""
+    import io
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive_file:
+            if sum(info.file_size for info in archive_file.infolist()) > max_uncompressed_bytes:
+                return False
+            if "messages.jsonl" in archive_file.namelist():
+                raw_messages = archive_file.read("messages.jsonl").decode("utf-8", errors="replace")
+                for line in raw_messages.splitlines():
+                    try:
+                        message = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        isinstance(message, dict)
+                        and message.get("channel") == StartupCanary.PRIVATE_CHANNEL
+                    ):
+                        return True
+            for filename in ("jobs.json", "summaries.json"):
+                if filename not in archive_file.namelist():
+                    continue
+                try:
+                    records = json.loads(archive_file.read(filename))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if isinstance(records, list) and any(
+                    isinstance(record, dict)
+                    and record.get("channel") == StartupCanary.PRIVATE_CHANNEL
+                    for record in records
+                ):
+                    return True
+    except (zipfile.BadZipFile, OSError):
+        return False
+    return False
+
+
 @app.post("/api/import")
 async def import_history(file: UploadFile = File(...)):
     """Upload a zip archive and merge it into current stores."""
@@ -1514,6 +1590,11 @@ async def import_history(file: UploadFile = File(...)):
     if len(content) > _archive.MAX_IMPORT_SIZE:
         return JSONResponse(
             {"error": f"file too large (max {_archive.MAX_IMPORT_SIZE // 1024 // 1024}MB)"},
+            status_code=400,
+        )
+    if _archive_contains_private_canary_data(content, _archive.MAX_IMPORT_SIZE):
+        return JSONResponse(
+            {"error": "archive contains reserved private data"},
             status_code=400,
         )
     channel_list = list(room_settings.get("channels", ["general"]))
@@ -1573,6 +1654,9 @@ async def api_send(request: Request):
         return JSONResponse({"error": "text is required"}, status_code=400)
     channel = body.get("channel", "general")
 
+    if channel == StartupCanary.PRIVATE_CHANNEL:
+        return JSONResponse({"error": "private channel is reserved"}, status_code=400)
+
     msg = store.add(sender, text, channel=channel)
     return JSONResponse(msg)
 
@@ -1586,6 +1670,7 @@ async def get_status():
 
 @app.get("/healthz")
 async def team_up_health():
+    global startup_canary
     from mcp_bridge import is_online
     from provider_readiness import is_valid_provider_report
 
@@ -1610,16 +1695,38 @@ async def team_up_health():
             "provider_state": provider_state,
             "reason_code": reason_code,
         }
+    provider_ready = (
+        active_team_up == expected
+        and all(
+            status["online"] and status["provider_state"] == "provider_ready"
+            for status in agent_status.values()
+        )
+    )
+    if startup_canary is not None and any(
+        not status["online"] or status["provider_state"] == "offline"
+        for status in agent_status.values()
+    ):
+        _reset_startup_canary()
+    if provider_ready and startup_canary is None:
+        startup_canary = StartupCanary(
+            agents,
+            TEAM_UP_IDENTITIES,
+            provider_status=_startup_provider_status,
+        )
+        import mcp_bridge
+        mcp_bridge.startup_canary = startup_canary
+    if provider_ready and startup_canary is not None:
+        startup_canary.begin()
+    canary_snapshot = (
+        startup_canary.snapshot()
+        if startup_canary is not None
+        else {"state": "blocked", "complete": True, "agents": {}}
+    )
     return {
         "service": "agentchattr-team-up-v2",
-        "ready": (
-            active_team_up == expected
-            and all(
-                status["online"] and status["provider_state"] == "provider_ready"
-                for status in agent_status.values()
-            )
-        ),
+        "ready": provider_ready and canary_snapshot.get("state") == "passed",
         "agents": agent_status,
+        "canary": canary_snapshot,
     }
 
 
@@ -2435,6 +2542,8 @@ async def get_session_templates():
 
 @app.get("/api/sessions/active")
 async def get_active_session(channel: str = "general"):
+    if channel == StartupCanary.PRIVATE_CHANNEL:
+        return JSONResponse(None)
     if not session_engine:
         return JSONResponse(None)
     session = session_engine.get_active(channel)
@@ -2445,7 +2554,11 @@ async def get_active_session(channel: str = "general"):
 async def get_all_active_sessions():
     if not session_engine:
         return JSONResponse([])
-    return JSONResponse(session_engine.list_active())
+    return JSONResponse([
+        session
+        for session in session_engine.list_active()
+        if session.get("channel", "general") != StartupCanary.PRIVATE_CHANNEL
+    ])
 
 
 @app.post("/api/sessions/start")
@@ -2456,6 +2569,8 @@ async def start_session(request: Request):
     template_id = body.get("template_id", "")
     draft_message_id = body.get("draft_message_id")
     channel = body.get("channel", "general")
+    if channel == StartupCanary.PRIVATE_CHANNEL:
+        return JSONResponse({"error": "private channel is reserved"}, status_code=400)
     cast = body.get("cast", {})
     goal = body.get("goal", "")
     started_by = body.get("started_by", "user")

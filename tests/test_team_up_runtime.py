@@ -17,6 +17,296 @@ from unittest import mock
 from wrapper import _merge_launch_args, _resolve_mcp_inject, _resolve_provider
 
 
+class StartupCanaryTests(unittest.TestCase):
+    IDENTITIES = (
+        "claude-lead",
+        "gemini-video",
+        "codex-sol",
+        "codex-terra",
+        "codex-luna",
+    )
+
+    def _make_canary(self, root, *, now=None, provider_status=None, nonces=None):
+        from agents import AgentTrigger
+        from startup_canary import StartupCanary
+
+        nonce_values = iter(nonces or [f"nonce-{name}" for name in self.IDENTITIES])
+        trigger = AgentTrigger(SimpleNamespace(), data_dir=str(root))
+        canary = StartupCanary(
+            trigger,
+            self.IDENTITIES,
+            timeout_seconds=10,
+            now=now or (lambda: 100.0),
+            nonce_factory=lambda: next(nonce_values),
+            provider_status=provider_status,
+        )
+        return canary
+
+    def test_all_five_agents_must_answer_through_the_production_queue_path(self):
+        from startup_canary import StartupCanary
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            canary = self._make_canary(root)
+            canary.begin()
+
+            for identity in self.IDENTITIES:
+                entries = [
+                    json.loads(line)
+                    for line in (root / f"{identity}_queue.jsonl").read_text("utf-8").splitlines()
+                ]
+                self.assertEqual(len(entries), 1)
+                self.assertEqual(entries[0]["channel"], StartupCanary.PRIVATE_CHANNEL)
+                self.assertIn(f"nonce-{identity}", entries[0]["prompt"])
+                canary.observe({
+                    "sender": identity,
+                    "text": f"nonce-{identity}",
+                    "channel": StartupCanary.PRIVATE_CHANNEL,
+                })
+
+            snapshot = canary.snapshot()
+
+        self.assertEqual(snapshot["state"], "passed")
+        self.assertTrue(snapshot["complete"])
+        self.assertTrue(all(item["state"] == "passed" for item in snapshot["agents"].values()))
+        serialized = json.dumps(snapshot)
+        self.assertNotIn("nonce-", serialized)
+
+    def test_nonce_from_the_wrong_authenticated_sender_fails_closed(self):
+        from startup_canary import StartupCanary
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            canary = self._make_canary(Path(temporary_dir))
+            canary.begin()
+            canary.observe({
+                "sender": "codex-terra",
+                "text": "nonce-codex-sol",
+                "channel": StartupCanary.PRIVATE_CHANNEL,
+            })
+
+        snapshot = canary.snapshot()
+        self.assertEqual(snapshot["state"], "blocked")
+        self.assertEqual(
+            snapshot["agents"]["codex-sol"],
+            {"state": "blocked", "reason": "wrong_sender", "timestamp": 100.0},
+        )
+
+    def test_wrong_or_replayed_nonce_fails_closed(self):
+        from startup_canary import StartupCanary
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            wrong = self._make_canary(root / "wrong")
+            wrong.begin()
+            wrong.observe({
+                "sender": "codex-sol",
+                "text": "not-the-issued-value",
+                "channel": StartupCanary.PRIVATE_CHANNEL,
+            })
+            self.assertEqual(
+                wrong.snapshot()["agents"]["codex-sol"]["reason"],
+                "nonce_mismatch",
+            )
+
+            replayed = self._make_canary(root / "replayed")
+            replayed.begin()
+            response = {
+                "sender": "codex-sol",
+                "text": "nonce-codex-sol",
+                "channel": StartupCanary.PRIVATE_CHANNEL,
+            }
+            replayed.observe(response)
+            replayed.observe(response)
+            self.assertEqual(
+                replayed.snapshot()["agents"]["codex-sol"]["reason"],
+                "replayed_nonce",
+            )
+
+    def test_timeout_and_manual_action_results_are_sanitized_blockers(self):
+        from startup_canary import StartupCanary
+
+        clock = [100.0]
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            timed_out = self._make_canary(root / "timeout", now=lambda: clock[0])
+            timed_out.begin()
+            clock[0] = 111.0
+            timeout_snapshot = timed_out.snapshot()
+
+            provider_reports = {
+                identity: ("provider_ready", "ready_prompt")
+                for identity in self.IDENTITIES
+            }
+            manual = self._make_canary(
+                root / "manual",
+                provider_status=lambda name: provider_reports[name],
+            )
+            manual.begin()
+            provider_reports["gemini-video"] = ("manual_action_required", "tool_approval")
+            manual_snapshot = manual.snapshot()
+
+        self.assertEqual(timeout_snapshot["state"], "blocked")
+        self.assertTrue(all(
+            item["reason"] == "response_timeout"
+            for item in timeout_snapshot["agents"].values()
+        ))
+        self.assertEqual(manual_snapshot["state"], "blocked")
+        self.assertEqual(
+            manual_snapshot["agents"]["gemini-video"]["reason"],
+            "tool_approval",
+        )
+
+    def test_server_restart_creates_a_fresh_unpassed_generation(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            first = self._make_canary(
+                root / "first",
+                nonces=[f"old-{name}" for name in self.IDENTITIES],
+            )
+            first.begin()
+            for identity in self.IDENTITIES:
+                first.observe({
+                    "sender": identity,
+                    "text": f"old-{identity}",
+                    "channel": first.PRIVATE_CHANNEL,
+                })
+            self.assertEqual(first.snapshot()["state"], "passed")
+
+            restarted = self._make_canary(
+                root / "restarted",
+                nonces=[f"new-{name}" for name in self.IDENTITIES],
+            )
+            restarted.begin()
+            restarted_snapshot = restarted.snapshot()
+
+        self.assertEqual(restarted_snapshot["state"], "pending")
+        self.assertTrue(all(
+            item["reason"] == "awaiting_response"
+            for item in restarted_snapshot["agents"].values()
+        ))
+        self.assertNotIn("old-", json.dumps(restarted_snapshot))
+        self.assertNotIn("new-", json.dumps(restarted_snapshot))
+
+    def test_authenticated_chat_send_is_consumed_without_store_or_mcp_leakage(self):
+        import mcp_bridge
+        from registry import RuntimeRegistry
+        from startup_canary import StartupCanary
+        from store import MessageStore
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            registry = RuntimeRegistry(data_dir=str(root / "registry"))
+            registry.seed({"codex-sol": {"dedicated_identity": True}})
+            registered = registry.register("codex-sol")
+            store = MessageStore(str(root / "messages.jsonl"))
+            canary = mock.Mock()
+            canary.observe.return_value = True
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    request=SimpleNamespace(
+                        headers={"authorization": f"Bearer {registered['token']}"},
+                    ),
+                ),
+            )
+            with (
+                mock.patch.object(mcp_bridge, "registry", registry),
+                mock.patch.object(mcp_bridge, "store", store),
+                mock.patch.object(mcp_bridge, "startup_canary", canary),
+                mock.patch.object(mcp_bridge, "activity_store", None),
+            ):
+                result = mcp_bridge.chat_send(
+                    sender="forged-name",
+                    message="raw-private-nonce",
+                    choices=[],
+                    channel=StartupCanary.PRIVATE_CHANNEL,
+                    ctx=ctx,
+                )
+
+        self.assertEqual(result, "Startup canary response accepted.")
+        canary.observe.assert_called_once_with({
+            "sender": "codex-sol",
+            "text": "raw-private-nonce",
+            "channel": StartupCanary.PRIVATE_CHANNEL,
+        })
+        self.assertEqual(store.get_recent(10), [])
+        self.assertNotIn("raw-private-nonce", result)
+
+    def test_rest_send_cannot_bypass_the_authenticated_chat_send_canary_path(self):
+        import app
+        from registry import RuntimeRegistry
+        from startup_canary import StartupCanary
+
+        class Request:
+            headers = {}
+
+            async def json(self):
+                return {
+                    "text": "raw-private-nonce",
+                    "channel": StartupCanary.PRIVATE_CHANNEL,
+                }
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            registry = RuntimeRegistry(data_dir=temporary_dir)
+            registry.seed({"codex-sol": {"dedicated_identity": True}})
+            registered = registry.register("codex-sol")
+            request = Request()
+            request.headers = {
+                "authorization": f"Bearer {registered['token']}",
+            }
+            canary = mock.Mock()
+            canary.observe.return_value = True
+            with (
+                mock.patch.object(app, "registry", registry),
+                mock.patch.object(app, "startup_canary", canary),
+            ):
+                response = asyncio.run(app.api_send(request))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(json.loads(response.body), {"error": "private channel is reserved"})
+        canary.observe.assert_not_called()
+
+    def test_private_channel_is_absent_from_mcp_reads_channels_and_summaries(self):
+        import mcp_bridge
+        from startup_canary import StartupCanary
+        from store import MessageStore
+        from summaries import SummaryStore
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            store = MessageStore(str(root / "messages.jsonl"))
+            store.add("ben", "visible", channel="general")
+            summaries = SummaryStore(str(root / "summaries.json"))
+            with (
+                mock.patch.object(mcp_bridge, "store", store),
+                mock.patch.object(mcp_bridge, "summaries", summaries),
+                mock.patch.object(
+                    mcp_bridge,
+                    "room_settings",
+                    {"channels": ["general", StartupCanary.PRIVATE_CHANNEL]},
+                ),
+                mock.patch.object(mcp_bridge, "registry", None),
+                mock.patch.object(mcp_bridge, "activity_store", None),
+            ):
+                all_messages = mcp_bridge.chat_read(limit=10)
+                private_messages = mcp_bridge.chat_read(
+                    limit=10,
+                    channel=StartupCanary.PRIVATE_CHANNEL,
+                )
+                channels = mcp_bridge.chat_channels()
+                summary_result = mcp_bridge.chat_summary(
+                    "write",
+                    "ben",
+                    text="raw-private-nonce",
+                    channel=StartupCanary.PRIVATE_CHANNEL,
+                )
+
+        self.assertIn("visible", all_messages)
+        self.assertEqual(private_messages, "")
+        self.assertEqual(json.loads(channels), ["general"])
+        self.assertEqual(summary_result, "Error: private channel is reserved.")
+        self.assertIsNone(summaries.get(StartupCanary.PRIVATE_CHANNEL))
+
+
 class ProviderReadinessClassifierTests(unittest.TestCase):
     def test_classifies_a_usable_provider_prompt(self):
         from provider_readiness import classify_provider_screen
@@ -906,8 +1196,18 @@ class TeamUpRuntimeTests(unittest.TestCase):
                 "raw_pane_text": secret_pane_text,
             },
         )
+        passed_canary = mock.Mock()
+        passed_canary.snapshot.return_value = {
+            "state": "passed",
+            "complete": True,
+            "agents": {
+                name: {"state": "passed", "reason": "response_verified", "timestamp": 100.0}
+                for name in expected
+            },
+        }
         with (
             mock.patch.object(app, "registry", exact_registry),
+            mock.patch.object(app, "startup_canary", passed_canary),
             mock.patch.object(
                 mcp_bridge,
                 "is_online",
@@ -919,6 +1219,7 @@ class TeamUpRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["service"], "agentchattr-team-up-v2")
         self.assertTrue(payload["ready"])
         self.assertEqual(set(payload["agents"]), expected)
+        self.assertEqual(payload["canary"]["state"], "passed")
         self.assertEqual(
             payload["agents"]["codex-sol"],
             {"online": True, "provider_state": "provider_ready", "reason_code": "ready_prompt"},
@@ -931,6 +1232,7 @@ class TeamUpRuntimeTests(unittest.TestCase):
         )
         with (
             mock.patch.object(app, "registry", suffixed_registry),
+            mock.patch.object(app, "startup_canary", passed_canary),
             mock.patch.object(mcp_bridge, "is_online", return_value=True),
         ):
             payload = asyncio.run(app.team_up_health())
@@ -947,6 +1249,7 @@ class TeamUpRuntimeTests(unittest.TestCase):
         )
         with (
             mock.patch.object(app, "registry", blocked_registry),
+            mock.patch.object(app, "startup_canary", passed_canary),
             mock.patch.object(mcp_bridge, "is_online", return_value=True),
         ):
             payload = asyncio.run(app.team_up_health())
@@ -954,6 +1257,7 @@ class TeamUpRuntimeTests(unittest.TestCase):
 
         with (
             mock.patch.object(app, "registry", exact_registry),
+            mock.patch.object(app, "startup_canary", passed_canary),
             mock.patch.object(
                 mcp_bridge,
                 "is_online",
@@ -962,6 +1266,57 @@ class TeamUpRuntimeTests(unittest.TestCase):
         ):
             payload = asyncio.run(app.team_up_health())
         self.assertFalse(payload["ready"])
+
+        pending_canary = mock.Mock()
+        pending_canary.snapshot.return_value = {
+            "state": "pending",
+            "complete": False,
+            "agents": {},
+        }
+        canary_trigger = object()
+        with (
+            mock.patch.object(app, "registry", exact_registry),
+            mock.patch.object(app, "startup_canary", None),
+            mock.patch.object(app, "agents", canary_trigger),
+            mock.patch.object(app, "StartupCanary", return_value=pending_canary) as constructor,
+            mock.patch.object(mcp_bridge, "startup_canary", None),
+            mock.patch.object(mcp_bridge, "is_online", return_value=True),
+        ):
+            payload = asyncio.run(app.team_up_health())
+            self.assertIs(mcp_bridge.startup_canary, pending_canary)
+        constructor.assert_called_once_with(
+            canary_trigger,
+            app.TEAM_UP_IDENTITIES,
+            provider_status=mock.ANY,
+        )
+        pending_canary.begin.assert_called_once_with()
+        self.assertFalse(payload["ready"])
+
+    def test_team_up_health_resets_a_passed_canary_after_wrapper_offline(self):
+        import app
+        import mcp_bridge
+
+        expected = set(app.TEAM_UP_IDENTITIES)
+        registry = SimpleNamespace(
+            get_active_names=lambda: sorted(expected),
+            get_instance=lambda name: {
+                "provider_state": "offline" if name == "codex-luna" else "provider_ready",
+                "provider_reason_code": "provider_offline" if name == "codex-luna" else "ready_prompt",
+            },
+        )
+        passed_canary = mock.Mock()
+        with (
+            mock.patch.object(app, "registry", registry),
+            mock.patch.object(app, "startup_canary", passed_canary),
+            mock.patch.object(mcp_bridge, "startup_canary", passed_canary),
+            mock.patch.object(mcp_bridge, "is_online", return_value=True),
+        ):
+            payload = asyncio.run(app.team_up_health())
+            self.assertIsNone(app.startup_canary)
+            self.assertIsNone(mcp_bridge.startup_canary)
+
+        self.assertFalse(payload["ready"])
+        self.assertEqual(payload["canary"]["state"], "blocked")
 
     def test_queue_lock_serializes_append_and_claim(self):
         import threading
@@ -1139,6 +1494,8 @@ class TeamUpRuntimeTests(unittest.TestCase):
         dead_tmux_targets: tuple[str, ...] = (),
         health_ready: bool = True,
         agents_ready: bool = True,
+        blocked_identity: str = "codex-luna",
+        blocked_reason: str = "response_timeout",
     ):
         source_script = Path(__file__).parents[1] / "macos-linux" / "start_team_up.sh"
 
@@ -1156,6 +1513,7 @@ class TeamUpRuntimeTests(unittest.TestCase):
             "    case \"$3\" in\n"
             "        server) [ \"$TEAM_UP_HEALTH_READY\" = \"1\" ] ;;\n"
             "        agents) [ \"$TEAM_UP_AGENTS_READY\" = \"1\" ] ;;\n"
+            "        blocker) printf '%s: %s\\n' \"$TEAM_UP_BLOCKED_IDENTITY\" \"$TEAM_UP_BLOCKED_REASON\" ;;\n"
             "    esac\n"
             "    exit $?\n"
             "fi\n"
@@ -1285,6 +1643,8 @@ class TeamUpRuntimeTests(unittest.TestCase):
             ),
             "TEAM_UP_HEALTH_READY": "1" if health_ready else "0",
             "TEAM_UP_AGENTS_READY": "1" if agents_ready else "0",
+            "TEAM_UP_BLOCKED_IDENTITY": blocked_identity,
+            "TEAM_UP_BLOCKED_REASON": blocked_reason,
         }
         return script, project, env, tmux_state, tmux_log, nohup_log
 
@@ -1570,6 +1930,30 @@ class TeamUpRuntimeTests(unittest.TestCase):
                     for target in tmux_state.read_text("utf-8").splitlines()
                 )
             )
+
+    def test_launcher_timeout_prints_exact_blocked_identity_and_safe_reason(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            script, project, env, _, _, _ = self._make_wrapper_launcher_fixture(
+                root,
+                agents_ready=False,
+                blocked_identity="gemini-video",
+                blocked_reason="tool_approval",
+            )
+            env["RAW_PRIVATE_NONCE"] = "must-never-appear"
+
+            result = subprocess.run(
+                ["sh", str(script), str(project)],
+                check=False,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("gemini-video", result.stderr)
+        self.assertIn("tool_approval", result.stderr)
+        self.assertNotIn("must-never-appear", result.stdout + result.stderr)
 
     def test_launcher_preserves_similarly_prefixed_sessions_and_windows(self):
         real_tmux = shutil.which("tmux")

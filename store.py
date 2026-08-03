@@ -7,6 +7,8 @@ import threading
 import uuid
 from pathlib import Path
 
+from startup_canary import StartupCanary
+
 
 class MessageStore:
     def __init__(self, path: str):
@@ -28,6 +30,7 @@ class MessageStore:
         if not self._path.exists():
             return
         max_id = -1
+        purged_private = False
         with open(self._path, "r", encoding="utf-8") as f:
             for i, line in enumerate(f):
                 line = line.strip()
@@ -40,10 +43,15 @@ class MessageStore:
                         msg["id"] = i
                     if msg["id"] > max_id:
                         max_id = msg["id"]
+                    if msg.get("channel", "general") == StartupCanary.PRIVATE_CHANNEL:
+                        purged_private = True
+                        continue
                     self._messages.append(msg)
                 except json.JSONDecodeError:
                     continue
         self._next_id = max_id + 1
+        if purged_private:
+            self._rewrite()
 
     def on_message(self, callback):
         """Register a callback(msg) called whenever a message is added."""
@@ -57,6 +65,8 @@ class MessageStore:
             timestamp: float | None = None,
             time_str: str | None = None,
             _bulk: bool = False) -> dict:
+        if channel == StartupCanary.PRIVATE_CHANNEL:
+            raise ValueError("private channel is reserved")
         with self._lock:
             ts = timestamp if timestamp is not None else time.time()
             msg = {
@@ -117,20 +127,30 @@ class MessageStore:
     def get_by_id(self, msg_id: int) -> dict | None:
         with self._lock:
             for m in self._messages:
-                if m["id"] == msg_id:
+                if (
+                    m["id"] == msg_id
+                    and m.get("channel", "general") != StartupCanary.PRIVATE_CHANNEL
+                ):
                     return m
             return None
 
     def get_recent(self, count: int = 50, channel: str | None = None) -> list[dict]:
         with self._lock:
-            msgs = self._messages
+            msgs = [
+                m for m in self._messages
+                if m.get("channel", "general") != StartupCanary.PRIVATE_CHANNEL
+            ]
             if channel:
                 msgs = [m for m in msgs if m.get("channel", "general") == channel]
             return list(msgs[-count:])
 
     def get_since(self, since_id: int = 0, channel: str | None = None) -> list[dict]:
         with self._lock:
-            msgs = [m for m in self._messages if m["id"] > since_id]
+            msgs = [
+                m for m in self._messages
+                if m["id"] > since_id
+                and m.get("channel", "general") != StartupCanary.PRIVATE_CHANNEL
+            ]
             if channel:
                 msgs = [m for m in msgs if m.get("channel", "general") == channel]
             return msgs
@@ -346,7 +366,11 @@ class MessageStore:
                 ids = {k for k, v in self._todos.items() if v == status}
             else:
                 ids = set(self._todos.keys())
-            return [m for m in self._messages if m["id"] in ids]
+            return [
+                m for m in self._messages
+                if m["id"] in ids
+                and m.get("channel", "general") != StartupCanary.PRIVATE_CHANNEL
+            ]
 
     @property
     def last_id(self) -> int:

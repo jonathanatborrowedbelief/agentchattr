@@ -13,6 +13,7 @@ import threading
 from pathlib import Path
 
 from mcp.server.fastmcp import Context, FastMCP
+from startup_canary import StartupCanary
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ config = None         # set by run.py — full config.toml dict
 router = None         # set by run.py — Router instance
 agents = None         # set by run.py — AgentManager instance
 activity_store = None # set by run.py — AgentActivityStore instance
+startup_canary: StartupCanary | None = None
 _presence: dict[str, float] = {}
 _activity: dict[str, bool] = {}   # True = screen changed on last poll
 _activity_ts: dict[str, float] = {}  # timestamp of last active=True heartbeat
@@ -225,6 +227,24 @@ def chat_send(
     if not message.strip() and not image_path:
         return "Empty message, not sent."
 
+    if channel == StartupCanary.PRIVATE_CHANNEL:
+        if activity_instance is None or startup_canary is None:
+            return "Error: authenticated startup canary response required."
+        if choices or image_path or reply_to >= 0 or job_id:
+            return "Error: startup canary response must be plain text."
+        accepted = startup_canary.observe({
+            "sender": sender,
+            "text": message.strip(),
+            "channel": StartupCanary.PRIVATE_CHANNEL,
+        })
+        with _presence_lock:
+            _presence[sender] = time.time()
+        if activity_store:
+            activity_store.mark_done(activity_instance["name"], "response_posted")
+        if accepted:
+            return "Startup canary response accepted."
+        return "Error: startup canary response rejected."
+
     # Job-scoped send: post into a job conversation instead of main timeline
     if job_id and jobs:
         # Detect suggestion type from [suggestion] prefix
@@ -389,6 +409,8 @@ def _serialize_messages(msgs: list[dict]) -> str:
     """Serialize store messages into MCP chat_read output shape."""
     out = []
     for m in msgs:
+        if m.get("channel", "general") == StartupCanary.PRIVATE_CHANNEL:
+            continue
         entry = {
             "id": m["id"],
             "sender": m["sender"],
@@ -563,6 +585,8 @@ def chat_read(
         return err
     if activity_store and activity_instance:
         activity_store.mark_tool(activity_instance["name"], "chat_read")
+    if channel == StartupCanary.PRIVATE_CHANNEL:
+        return ""
 
     # Job-scoped read: return job metadata plus the thread messages
     if job_id and jobs:
@@ -661,6 +685,8 @@ def chat_resync(
     sender, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=True)
     if err:
         return err
+    if channel == StartupCanary.PRIVATE_CHANNEL:
+        return ""
     ch = channel if channel else None
     msgs = store.get_recent(limit, channel=ch)
     _update_cursor(sender, msgs, ch)
@@ -868,6 +894,7 @@ def chat_claim(sender: str, name: str = "", ctx: Context | None = None) -> str:
 def chat_channels() -> str:
     """List all available channels. Returns a JSON array of channel names."""
     channels = room_settings.get("channels", ["general"]) if room_settings else ["general"]
+    channels = [ch for ch in channels if ch != StartupCanary.PRIVATE_CHANNEL]
     return json.dumps(channels)
 
 
@@ -891,6 +918,8 @@ def chat_summary(
         return err
     action = action.strip().lower()
     channel = (channel or "general").strip()
+    if channel == StartupCanary.PRIVATE_CHANNEL:
+        return "Error: private channel is reserved."
 
     if action == "read":
         entry = summaries.get(channel)

@@ -219,6 +219,44 @@ class ArchiveRoundTripTests(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertIn("unsupported archive schema_version", report["error"])
 
+    def test_private_startup_canary_messages_are_purged_and_never_exported(self):
+        from startup_canary import StartupCanary
+
+        nonce = "raw-secret-canary-nonce"
+        message_path = self.root / "private" / "messages.jsonl"
+        message_path.parent.mkdir(parents=True)
+        message_path.write_text(
+            json.dumps({
+                "id": 0,
+                "uid": "private-message",
+                "sender": "codex-sol",
+                "text": nonce,
+                "type": "chat",
+                "timestamp": 100.0,
+                "time": "00:01:40",
+                "attachments": [],
+                "channel": StartupCanary.PRIVATE_CHANNEL,
+            }) + "\n",
+            encoding="utf-8",
+        )
+        private_store = MessageStore(str(message_path))
+        private_store.add("ben", "visible", channel="general")
+
+        blob = archive.build_export(
+            private_store,
+            self.source_jobs,
+            self.source_rules,
+            self.source_summaries,
+            app_version="test",
+        )
+
+        self.assertNotIn(nonce, message_path.read_text("utf-8"))
+        self.assertEqual(private_store.get_recent(10), [private_store.get_by_id(1)])
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            exported = zf.read("messages.jsonl").decode("utf-8")
+        self.assertNotIn(nonce, exported)
+        self.assertNotIn(StartupCanary.PRIVATE_CHANNEL, exported)
+
 
 class ImportExportApiTests(unittest.TestCase):
     def setUp(self):
@@ -305,6 +343,31 @@ class ImportExportApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         payload = json.loads(response.body.decode("utf-8"))
         self.assertIn("expected .zip", payload["error"])
+
+    def test_import_endpoint_rejects_private_canary_records_without_echoing_nonce(self):
+        from startup_canary import StartupCanary
+
+        nonce = "raw-imported-private-nonce"
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("manifest.json", json.dumps({"schema_version": archive.SCHEMA_VERSION}))
+            zf.writestr("messages.jsonl", json.dumps({
+                "sender": "codex-sol",
+                "text": nonce,
+                "channel": StartupCanary.PRIVATE_CHANNEL,
+            }) + "\n")
+            zf.writestr("jobs.json", "[]")
+            zf.writestr("rules.json", "[]")
+            zf.writestr("summaries.json", "[]")
+
+        upload = UploadFile(filename="private.zip", file=io.BytesIO(buf.getvalue()))
+        response = asyncio.run(app.import_history(upload))
+        payload = json.loads(response.body.decode("utf-8"))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(payload, {"error": "archive contains reserved private data"})
+        self.assertNotIn(nonce, response.body.decode("utf-8"))
+        self.assertEqual(self.store.get_recent(10), [])
 
 
 if __name__ == "__main__":
