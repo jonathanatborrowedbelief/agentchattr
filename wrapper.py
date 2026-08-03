@@ -524,6 +524,36 @@ def _register_instance(server_port: int, base: str, label: str | None = None) ->
         return json.loads(reg_resp.read())
 
 
+def _register_configured_identity(
+    server_port: int,
+    agent: str,
+    agent_config: dict,
+    label: str | None = None,
+) -> dict:
+    """Register the configured identity without accepting a dedicated suffix."""
+    registration = _register_instance(server_port, agent, label)
+    if agent_config.get("dedicated_identity") and registration.get("name") != agent:
+        raise RuntimeError(
+            f"dedicated identity {agent} registered as {registration.get('name')}"
+        )
+    return registration
+
+
+def _register_configured_identity_with_retry(
+    server_port: int,
+    agent: str,
+    agent_config: dict,
+    label: str | None = None,
+) -> dict:
+    """Retry registration while preserving the configured dedicated identity."""
+    registration = _register_instance_with_retry(server_port, agent, label)
+    if agent_config.get("dedicated_identity") and registration.get("name") != agent:
+        raise RuntimeError(
+            f"dedicated identity {agent} registered as {registration.get('name')}"
+        )
+    return registration
+
+
 def _register_instance_with_retry(
     server_port: int,
     base: str,
@@ -852,7 +882,12 @@ def _run_main(cleanup: _RegistrationCleanup):
         sys.exit(1)
 
     try:
-        registration = _register_instance_with_retry(server_port, agent, args.label)
+        registration = _register_configured_identity_with_retry(
+            server_port,
+            agent,
+            agent_cfg,
+            args.label,
+        )
     except Exception as exc:
         print(f"  Registration failed ({exc}).")
         print("  Wrapper cannot continue without a registered identity.")
@@ -1055,7 +1090,12 @@ def _run_main(cleanup: _RegistrationCleanup):
             except urllib.error.HTTPError as exc:
                 if exc.code == 409:
                     try:
-                        replacement = _register_instance(server_port, agent, args.label)
+                        replacement = _register_configured_identity(
+                            server_port,
+                            agent,
+                            agent_cfg,
+                            args.label,
+                        )
                         set_runtime_identity(replacement["name"], replacement["token"])
                         if assigned_role:
                             _assign_role(server_port, replacement["name"], str(assigned_role))

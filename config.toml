@@ -15,6 +15,7 @@ label = "Claude"
 
 [agents.claude-lead]
 provider = "claude"
+dedicated_identity = true
 command = "claude"
 cwd = "~/Documents/Codex"
 label = "Claude Lead"
@@ -31,6 +32,7 @@ label = "Codex"
 
 [agents.codex-sol]
 provider = "codex"
+dedicated_identity = true
 command = "codex"
 cwd = "~/Documents/Codex"
 label = "Codex Sol"
@@ -40,6 +42,7 @@ instructions_file = "Codex.md"
 
 [agents.codex-terra]
 provider = "codex"
+dedicated_identity = true
 command = "codex"
 cwd = "~/Documents/Codex"
 label = "Codex Terra"
@@ -49,6 +52,7 @@ instructions_file = "Codex.md"
 
 [agents.codex-luna]
 provider = "codex"
+dedicated_identity = true
 command = "codex"
 cwd = "~/Documents/Codex"
 label = "Codex Luna"
@@ -64,6 +68,7 @@ label = "Gemini"
 
 [agents.gemini-video]
 provider = "gemini"
+dedicated_identity = true
 command = "gemini"
 cwd = "~/Documents/Codex"
 label = "Gemini Video"

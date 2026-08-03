@@ -31,6 +31,14 @@ class Instance:
     registered_at: float = field(default_factory=time.time)
 
 
+class IdentityConflict(Exception):
+    """Raised when a dedicated runtime identity already has a live instance."""
+
+    def __init__(self, base: str):
+        self.base = base
+        super().__init__(f"identity already live: {base}")
+
+
 class RuntimeRegistry:
     GRACE_PERIOD = 30  # seconds — name reserved after deregister
 
@@ -101,56 +109,73 @@ class RuntimeRegistry:
                 return None
 
             self._expire_reserved()
-
-            # Find next free slot
-            taken = {i.slot for i in self._instances.values() if i.base == base}
-            reserved = set()
-            for rn in self._reserved:
-                rb, rs = self._parse_name(rn)
-                if rb == base:
-                    reserved.add(rs)
-
-            slot = 1
-            while slot in taken or slot in reserved:
-                slot += 1
-
-            # When a 2nd instance registers, rename slot-1 from "base" to "base-1"
-            # so that no instance shares a name with the base family.  This prevents
-            # a second instance from sending messages as "base" (identity theft).
-            renamed_slot1 = None
-            if slot >= 2 and base in self._instances:
-                slot1 = self._instances[base]
-                if slot1.base == base and slot1.slot == 1:
-                    new_s1_name = f"{base}-1"
-                    del self._instances[base]
-                    slot1.name = new_s1_name
-                    base_cfg = self._bases[base]
-                    slot1.label = f"{base_cfg.get('label', base.capitalize())} 1"
-                    # Color stays the same (slot 1 = base color)
-                    self._instances[new_s1_name] = slot1
-                    self._renames[base] = new_s1_name
-                    renamed_slot1 = {"old": base, "new": new_s1_name}
-
-            name = base if slot == 1 else f"{base}-{slot}"
             base_cfg = self._bases[base]
-            color = _derive_color(base_cfg.get("color", "#888"), slot)
 
-            if label:
-                lbl = label
-            elif slot == 1:
-                lbl = base_cfg.get("label", base.capitalize())
+            if base_cfg.get("dedicated_identity"):
+                if any(inst.base == base for inst in self._instances.values()):
+                    raise IdentityConflict(base)
+
+                # Dedicated Team Up identities are never allocated slots or held
+                # by the generic post-deregister reservation window.
+                self._reserved.pop(base, None)
+                inst = Instance(
+                    name=base,
+                    base=base,
+                    slot=1,
+                    label=label or base_cfg.get("label", base.capitalize()),
+                    color=_derive_color(base_cfg.get("color", "#888"), 1),
+                    state="active",
+                )
+                self._instances[base] = inst
+                result = _inst_dict(inst, include_token=True)
             else:
-                lbl = f"{base_cfg.get('label', base.capitalize())} {slot}"
+                # Find next free slot
+                taken = {i.slot for i in self._instances.values() if i.base == base}
+                reserved = set()
+                for rn in self._reserved:
+                    rb, rs = self._parse_name(rn)
+                    if rb == base:
+                        reserved.add(rs)
 
-            # Fresh registrations are immediately authoritative. Identity
-            # recovery/reclaim still uses chat_claim, but normal startup should
-            # not block on a manual confirmation step.
-            state = "active"
-            inst = Instance(name=name, base=base, slot=slot, label=lbl, color=color, state=state)
-            self._instances[name] = inst
-            result = _inst_dict(inst, include_token=True)
-            if renamed_slot1:
-                result["_renamed_slot1"] = renamed_slot1
+                slot = 1
+                while slot in taken or slot in reserved:
+                    slot += 1
+
+                # When a 2nd instance registers, rename slot-1 from "base" to "base-1"
+                # so that no instance shares a name with the base family.  This prevents
+                # a second instance from sending messages as "base" (identity theft).
+                renamed_slot1 = None
+                if slot >= 2 and base in self._instances:
+                    slot1 = self._instances[base]
+                    if slot1.base == base and slot1.slot == 1:
+                        new_s1_name = f"{base}-1"
+                        del self._instances[base]
+                        slot1.name = new_s1_name
+                        slot1.label = f"{base_cfg.get('label', base.capitalize())} 1"
+                        # Color stays the same (slot 1 = base color)
+                        self._instances[new_s1_name] = slot1
+                        self._renames[base] = new_s1_name
+                        renamed_slot1 = {"old": base, "new": new_s1_name}
+
+                name = base if slot == 1 else f"{base}-{slot}"
+                color = _derive_color(base_cfg.get("color", "#888"), slot)
+
+                if label:
+                    lbl = label
+                elif slot == 1:
+                    lbl = base_cfg.get("label", base.capitalize())
+                else:
+                    lbl = f"{base_cfg.get('label', base.capitalize())} {slot}"
+
+                # Fresh registrations are immediately authoritative. Identity
+                # recovery/reclaim still uses chat_claim, but normal startup should
+                # not block on a manual confirmation step.
+                state = "active"
+                inst = Instance(name=name, base=base, slot=slot, label=lbl, color=color, state=state)
+                self._instances[name] = inst
+                result = _inst_dict(inst, include_token=True)
+                if renamed_slot1:
+                    result["_renamed_slot1"] = renamed_slot1
 
         self._notify()
         self._save_renames()
@@ -167,7 +192,10 @@ class RuntimeRegistry:
                 return None
             base = self._instances[name].base
             del self._instances[name]
-            self._reserved[name] = time.time()
+            if self._bases.get(base, {}).get("dedicated_identity"):
+                self._reserved.pop(name, None)
+            else:
+                self._reserved[name] = time.time()
 
             # If family drops to 1 instance with a numbered name, rename back to base
             renamed_back = None

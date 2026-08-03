@@ -21,7 +21,7 @@ from jobs import JobStore
 from schedules import ScheduleStore, parse_schedule_spec
 from router import Router
 from agents import AgentTrigger
-from registry import RuntimeRegistry
+from registry import IdentityConflict, RuntimeRegistry
 from session_store import SessionStore, validate_session_template
 from session_engine import SessionEngine
 from agent_activity import AgentActivityStore
@@ -2153,7 +2153,10 @@ async def register_agent(request: Request):
     label = body.get("label")
     if not base:
         return JSONResponse({"error": "base is required"}, status_code=400)
-    result = registry.register(base, label)
+    try:
+        result = registry.register(base, label)
+    except IdentityConflict as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     if result is None:
         return JSONResponse({"error": f"unknown base: {base}"}, status_code=400)
     # Touch presence so the instance doesn't immediately time out

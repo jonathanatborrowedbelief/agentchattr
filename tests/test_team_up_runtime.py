@@ -1,3 +1,5 @@
+import asyncio
+import json
 import os
 import shlex
 import shutil
@@ -16,6 +18,95 @@ from wrapper import _merge_launch_args, _resolve_mcp_inject, _resolve_provider
 
 
 class TeamUpRuntimeTests(unittest.TestCase):
+    def test_team_up_agents_are_the_only_dedicated_identities(self):
+        from config_loader import load_config
+
+        config = load_config(Path(__file__).parents[1])
+
+        self.assertEqual(
+            {
+                name
+                for name, agent_config in config["agents"].items()
+                if agent_config.get("dedicated_identity")
+            },
+            {
+                "claude-lead",
+                "gemini-video",
+                "codex-sol",
+                "codex-terra",
+                "codex-luna",
+            },
+        )
+
+    def test_dedicated_identity_reclaims_its_exact_base_during_grace_window(self):
+        from registry import RuntimeRegistry
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            registry = RuntimeRegistry(data_dir=temporary_dir)
+            registry.seed(
+                {
+                    "codex-sol": {
+                        "label": "Codex Sol",
+                        "dedicated_identity": True,
+                    },
+                }
+            )
+
+            first = registry.register("codex-sol")
+            registry.deregister(first["name"])
+            restarted = registry.register("codex-sol")
+
+        self.assertEqual(first["name"], "codex-sol")
+        self.assertEqual(restarted["name"], "codex-sol")
+
+    def test_second_live_dedicated_registration_returns_http_409(self):
+        import app as app_module
+        from registry import RuntimeRegistry
+
+        class RegisterRequest:
+            async def json(self):
+                return {"base": "codex-sol"}
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            registry = RuntimeRegistry(data_dir=temporary_dir)
+            registry.seed({"codex-sol": {"dedicated_identity": True}})
+            registry.register("codex-sol")
+            with mock.patch.object(app_module, "registry", registry):
+                response = asyncio.run(app_module.register_agent(RegisterRequest()))
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(json.loads(response.body), {"error": "identity already live: codex-sol"})
+
+    def test_wrapper_rejects_a_suffix_for_a_dedicated_identity(self):
+        from wrapper import _register_configured_identity
+
+        with mock.patch(
+            "wrapper._register_instance",
+            return_value={"name": "codex-sol-2", "token": "test-token"},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "codex-sol-2"):
+                _register_configured_identity(
+                    8300,
+                    "codex-sol",
+                    {"dedicated_identity": True},
+                )
+
+    def test_generic_multi_instance_registration_keeps_suffixes_and_reservations(self):
+        from registry import RuntimeRegistry
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            registry = RuntimeRegistry(data_dir=temporary_dir)
+            registry.seed({"codex": {"label": "Codex"}})
+
+            first = registry.register("codex")
+            second = registry.register("codex")
+            registry.deregister(second["name"])
+            third = registry.register("codex")
+
+        self.assertEqual(first["name"], "codex")
+        self.assertEqual(second["name"], "codex-2")
+        self.assertEqual(third["name"], "codex-3")
+
     def test_stable_agents_declare_control_root_instruction_files(self):
         from config_loader import load_config
 
