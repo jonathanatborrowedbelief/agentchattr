@@ -28,6 +28,8 @@ class Instance:
     token: str = field(default_factory=lambda: secrets.token_hex(16))
     epoch: int = 1
     state: str = "pending"   # "pending" | "active"
+    provider_state: str = "registered"
+    provider_reason_code: str = "unknown_screen"
     registered_at: float = field(default_factory=time.time)
 
 
@@ -549,6 +551,29 @@ class RuntimeRegistry:
                     return _inst_dict(inst)
         return None
 
+    def report_provider_state(self, token: str, state: str, reason_code: str) -> bool:
+        """Record a sanitized, token-authenticated provider readiness report."""
+        from provider_readiness import is_valid_provider_report
+
+        if not is_valid_provider_report(state, reason_code):
+            return False
+        changed = False
+        with self._lock:
+            for inst in self._instances.values():
+                if secrets.compare_digest(inst.token, token):
+                    changed = (
+                        inst.provider_state != state
+                        or inst.provider_reason_code != reason_code
+                    )
+                    inst.provider_state = state
+                    inst.provider_reason_code = reason_code
+                    break
+            else:
+                return False
+        if changed:
+            self._notify()
+        return True
+
     def get_pending(self) -> list[dict]:
         """All pending instances (for timeout checks)."""
         with self._lock:
@@ -608,6 +633,8 @@ def _inst_dict(inst: Instance, include_token: bool = False) -> dict:
         "identity_id": inst.identity_id,
         "name": inst.name, "base": inst.base, "slot": inst.slot,
         "label": inst.label, "color": inst.color, "state": inst.state,
+        "provider_state": inst.provider_state,
+        "provider_reason_code": inst.provider_reason_code,
         "epoch": inst.epoch,
         "registered_at": inst.registered_at,
     }

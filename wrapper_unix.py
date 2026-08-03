@@ -15,7 +15,10 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
+
+from provider_readiness import classify_provider_screen
 
 
 def _session_exists(session_name: str) -> bool:
@@ -93,6 +96,49 @@ def _build_tmux_new_session_command(session_name, abs_cwd, agent_cmd, inject_env
     return tmux_command
 
 
+def _capture_pane_text(session_name: str) -> str | None:
+    """Read a pane locally for readiness classification without logging it."""
+    try:
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-t", session_name, "-p"],
+            capture_output=True,
+            timeout=2,
+        )
+        if result.returncode != 0:
+            return None
+        return result.stdout.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def _monitor_provider_readiness(
+    session_name,
+    provider,
+    *,
+    report_provider_state,
+    start_watcher,
+    inject_fn,
+    poll_interval: float = 1,
+    session_exists=_session_exists,
+):
+    """Poll one child pane and start queued delivery only after a ready prompt."""
+    last_report = None
+    while session_exists(session_name):
+        pane_text = _capture_pane_text(session_name)
+        if pane_text is None:
+            report = ("offline", "provider_offline")
+        else:
+            report = classify_provider_screen(provider, pane_text)
+        if report != last_report:
+            report_provider_state(*report)
+            last_report = report
+        if report[0] == "provider_ready":
+            start_watcher(inject_fn)
+            return True
+        time.sleep(poll_interval)
+    return False
+
+
 def run_agent(
     command,
     extra_args,
@@ -107,6 +153,9 @@ def run_agent(
     session_name=None,
     inject_env=None,
     inject_delay: float = 0.3,
+    provider: str | None = None,
+    report_provider_state=None,
+    readiness_poll_interval: float = 1,
 ):
     """Run agent inside a tmux session, inject via tmux send-keys."""
     _check_tmux()
@@ -133,6 +182,15 @@ def run_agent(
     # after the first tmux session exists, so startup cannot drop a prompt.
     inject_fn = lambda text: inject(text, tmux_session=session_name, delay=inject_delay)
     watcher_started = False
+    watcher_lock = threading.Lock()
+
+    def start_watcher_once():
+        nonlocal watcher_started
+        with watcher_lock:
+            if watcher_started:
+                return
+            start_watcher(inject_fn)
+            watcher_started = True
 
     print(f"  Using tmux session: {session_name}")
     print(f"  Detach: Ctrl+B, D  (agent keeps running)")
@@ -154,9 +212,20 @@ def run_agent(
             if result.returncode != 0:
                 print(f"  Error: failed to create tmux session (exit {result.returncode})")
                 break
-            if not watcher_started:
-                start_watcher(inject_fn)
-                watcher_started = True
+            if report_provider_state is None:
+                start_watcher_once()
+            elif provider:
+                threading.Thread(
+                    target=_monitor_provider_readiness,
+                    args=(session_name, provider),
+                    kwargs={
+                        "report_provider_state": report_provider_state,
+                        "start_watcher": lambda _: start_watcher_once(),
+                        "inject_fn": inject_fn,
+                        "poll_interval": readiness_poll_interval,
+                    },
+                    daemon=True,
+                ).start()
 
             # Attach — blocks until agent exits or user detaches (Ctrl+B, D)
             subprocess.run(["tmux", "attach-session", "-t", session_name])

@@ -17,6 +17,41 @@ from unittest import mock
 from wrapper import _merge_launch_args, _resolve_mcp_inject, _resolve_provider
 
 
+class ProviderReadinessClassifierTests(unittest.TestCase):
+    def test_classifies_a_usable_provider_prompt(self):
+        from provider_readiness import classify_provider_screen
+
+        self.assertEqual(
+            classify_provider_screen("codex", "› Describe the task you want to work on"),
+            ("provider_ready", "ready_prompt"),
+        )
+
+    def test_classifies_known_manual_action_blockers_without_returning_pane_text(self):
+        from provider_readiness import classify_provider_screen
+
+        cases = {
+            "An update is available. Restart to update now.": "update_dialog",
+            "Do you trust the files in this folder? (y/N)": "trust_screen",
+            "MCP server agentchattr failed to start: connection refused": "mcp_startup_failure",
+            "Allow this tool to run? [y/N]": "tool_approval",
+        }
+        for pane_text, expected_reason in cases.items():
+            with self.subTest(reason=expected_reason):
+                state, reason = classify_provider_screen("codex", pane_text)
+                self.assertEqual(state, "manual_action_required")
+                self.assertEqual(reason, expected_reason)
+                self.assertNotEqual(reason, pane_text)
+
+    def test_unknown_screen_fails_closed_as_registered(self):
+        from provider_readiness import classify_provider_screen
+
+        pane_text = "ACCESS_TOKEN=provider-secret-9fcd unexpected terminal banner"
+        self.assertEqual(
+            classify_provider_screen("codex", pane_text),
+            ("registered", "unknown_screen"),
+        )
+
+
 class TeamUpRuntimeTests(unittest.TestCase):
     def test_team_up_agents_are_the_only_dedicated_identities(self):
         from config_loader import load_config
@@ -159,6 +194,82 @@ class TeamUpRuntimeTests(unittest.TestCase):
         self.assertEqual(first["name"], "codex")
         self.assertEqual(second["name"], "codex-2")
         self.assertEqual(third["name"], "codex-3")
+
+    def test_provider_state_is_authenticated_and_heartbeat_does_not_change_it(self):
+        import app as app_module
+        from registry import RuntimeRegistry
+
+        class HeartbeatRequest:
+            def __init__(self, token):
+                self.headers = {"authorization": f"Bearer {token}"}
+
+            async def json(self):
+                raise ValueError("plain heartbeat")
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            registry = RuntimeRegistry(data_dir=temporary_dir)
+            registry.seed({"codex-sol": {"dedicated_identity": True}})
+            registered = registry.register("codex-sol")
+
+            self.assertEqual(registered["provider_state"], "registered")
+            self.assertTrue(registry.report_provider_state(
+                registered["token"], "provider_ready", "ready_prompt",
+            ))
+            self.assertFalse(registry.report_provider_state(
+                "wrong-token", "provider_ready", "ready_prompt",
+            ))
+            self.assertFalse(registry.report_provider_state(
+                registered["token"], "provider_ready", "unknown_screen",
+            ))
+
+            self.assertEqual(
+                registry.get_instance("codex-sol")["provider_state"],
+                "provider_ready",
+            )
+            with mock.patch.object(app_module, "registry", registry):
+                response = asyncio.run(app_module.heartbeat(
+                    "codex-sol", HeartbeatRequest(registered["token"]),
+                ))
+            self.assertEqual(response["name"], "codex-sol")
+            self.assertEqual(
+                registry.get_instance("codex-sol")["provider_state"],
+                "provider_ready",
+            )
+
+    def test_provider_state_endpoint_rejects_spoofed_sender_and_unknown_values(self):
+        import app as app_module
+        from registry import RuntimeRegistry
+
+        class ProviderStateRequest:
+            def __init__(self, token, body):
+                self.headers = {"authorization": f"Bearer {token}"}
+                self._body = body
+
+            async def json(self):
+                return self._body
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            registry = RuntimeRegistry(data_dir=temporary_dir)
+            registry.seed({"codex-sol": {"dedicated_identity": True}})
+            registered = registry.register("codex-sol")
+            with mock.patch.object(app_module, "registry", registry):
+                spoofed = asyncio.run(app_module.report_provider_state(
+                    "codex-terra",
+                    ProviderStateRequest(
+                        registered["token"],
+                        {"state": "provider_ready", "reason_code": "ready_prompt"},
+                    ),
+                ))
+                invalid = asyncio.run(app_module.report_provider_state(
+                    "codex-sol",
+                    ProviderStateRequest(
+                        registered["token"],
+                        {"state": "provider_ready", "reason_code": "pane secret"},
+                    ),
+                ))
+
+        self.assertEqual(spoofed.status_code, 403)
+        self.assertEqual(invalid.status_code, 400)
 
     def test_stable_agents_declare_control_root_instruction_files(self):
         from config_loader import load_config
@@ -454,6 +565,43 @@ class TeamUpRuntimeTests(unittest.TestCase):
 
         self.assertEqual(requests, [("/api/roles/codex-sol", b'{"role": "Integrator"}')])
 
+    def test_provider_state_wrapper_posts_only_allowlisted_status(self):
+        from wrapper import _report_provider_state
+
+        requests = []
+
+        class ProviderStateHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                requests.append((self.path, dict(self.headers), self.rfile.read(int(self.headers["Content-Length"]))))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, format, *args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), ProviderStateHandler)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            _report_provider_state(
+                server.server_port,
+                "codex-sol",
+                "test-token",
+                "provider_ready",
+                "ready_prompt",
+            )
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
+
+        self.assertEqual(len(requests), 1)
+        path, headers, body = requests[0]
+        self.assertEqual(path, "/api/provider-state/codex-sol")
+        self.assertEqual(headers["Authorization"], "Bearer test-token")
+        self.assertEqual(body, b'{"state": "provider_ready", "reason_code": "ready_prompt"}')
+        self.assertNotIn(b"PANE_SECRET_aa21", body)
+
     def test_selected_environment_reaches_tmux_for_inherited_values(self):
         from wrapper import _isolate_selected_session_env
         from wrapper_unix import _build_tmux_new_session_command
@@ -529,6 +677,37 @@ class TeamUpRuntimeTests(unittest.TestCase):
         self.assertEqual(len(new_sessions), 2)
         sleep.assert_any_call(3)
 
+    def test_readiness_monitor_defers_queue_watcher_until_provider_prompt(self):
+        from wrapper_unix import _monitor_provider_readiness
+
+        pane_texts = iter([
+            "Allow this tool to run? [y/N]",
+            "› Describe the task you want to work on",
+        ])
+        reports = []
+        watcher = mock.Mock()
+
+        with mock.patch(
+            "wrapper_unix._capture_pane_text",
+            side_effect=lambda session: next(pane_texts),
+        ):
+            ready = _monitor_provider_readiness(
+                "agentchattr-codex-sol",
+                "codex",
+                report_provider_state=lambda state, reason: reports.append((state, reason)),
+                start_watcher=watcher,
+                inject_fn=mock.sentinel.inject,
+                poll_interval=0,
+                session_exists=lambda _: True,
+            )
+
+        self.assertTrue(ready)
+        self.assertEqual(reports, [
+            ("manual_action_required", "tool_approval"),
+            ("provider_ready", "ready_prompt"),
+        ])
+        watcher.assert_called_once_with(mock.sentinel.inject)
+
     def test_unix_injection_checks_both_tmux_send_steps(self):
         from wrapper_unix import inject
 
@@ -598,8 +777,14 @@ class TeamUpRuntimeTests(unittest.TestCase):
             "codex-terra",
             "codex-luna",
         }
+        secret_pane_text = "GEMINI_API_KEY=never-return-this"
         exact_registry = SimpleNamespace(
-            get_active_names=lambda: sorted(expected)
+            get_active_names=lambda: sorted(expected),
+            get_instance=lambda name: {
+                "provider_state": "provider_ready",
+                "provider_reason_code": "ready_prompt",
+                "raw_pane_text": secret_pane_text,
+            },
         )
         with (
             mock.patch.object(app, "registry", exact_registry),
@@ -614,12 +799,34 @@ class TeamUpRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["service"], "agentchattr-team-up-v2")
         self.assertTrue(payload["ready"])
         self.assertEqual(set(payload["agents"]), expected)
+        self.assertEqual(
+            payload["agents"]["codex-sol"],
+            {"online": True, "provider_state": "provider_ready", "reason_code": "ready_prompt"},
+        )
+        self.assertNotIn(secret_pane_text, json.dumps(payload))
 
         suffixed_registry = SimpleNamespace(
-            get_active_names=lambda: [*sorted(expected), "gemini-video-2"]
+            get_active_names=lambda: [*sorted(expected), "gemini-video-2"],
+            get_instance=exact_registry.get_instance,
         )
         with (
             mock.patch.object(app, "registry", suffixed_registry),
+            mock.patch.object(mcp_bridge, "is_online", return_value=True),
+        ):
+            payload = asyncio.run(app.team_up_health())
+        self.assertFalse(payload["ready"])
+
+        blocked_registry = SimpleNamespace(
+            get_active_names=lambda: sorted(expected),
+            get_instance=lambda name: {
+                "provider_state": "manual_action_required"
+                if name == "codex-luna" else "provider_ready",
+                "provider_reason_code": "tool_approval"
+                if name == "codex-luna" else "ready_prompt",
+            },
+        )
+        with (
+            mock.patch.object(app, "registry", blocked_registry),
             mock.patch.object(mcp_bridge, "is_online", return_value=True),
         ):
             payload = asyncio.run(app.team_up_health())

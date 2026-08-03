@@ -206,7 +206,7 @@ def _install_security_middleware(token: str, cfg: dict):
                 return await call_next(request)
 
             # Agent registration/heartbeat: loopback only (no remote agent minting).
-            if path.startswith(("/api/register", "/api/deregister/", "/api/heartbeat/")):
+            if path.startswith(("/api/register", "/api/deregister/", "/api/heartbeat/", "/api/provider-state/")):
                 client_ip = request.client.host if request.client else ""
                 if client_ip not in ("127.0.0.1", "::1", "localhost"):
                     return JSONResponse(
@@ -1587,6 +1587,7 @@ async def get_status():
 @app.get("/healthz")
 async def team_up_health():
     from mcp_bridge import is_online
+    from provider_readiness import is_valid_provider_report
 
     active_team_up = set()
     if registry is not None:
@@ -1594,13 +1595,31 @@ async def team_up_health():
             if any(
                 name == base or name.startswith(f"{base}-")
                 for base in TEAM_UP_IDENTITIES
-            ) and is_online(name):
+            ):
                 active_team_up.add(name)
     expected = set(TEAM_UP_IDENTITIES)
+    agent_status = {}
+    for name in TEAM_UP_IDENTITIES:
+        inst = registry.get_instance(name) if registry is not None else None
+        provider_state = inst.get("provider_state") if inst else "registered"
+        reason_code = inst.get("provider_reason_code") if inst else "unknown_screen"
+        if not is_valid_provider_report(provider_state, reason_code):
+            provider_state, reason_code = "registered", "unknown_screen"
+        agent_status[name] = {
+            "online": name in active_team_up and is_online(name),
+            "provider_state": provider_state,
+            "reason_code": reason_code,
+        }
     return {
         "service": "agentchattr-team-up-v2",
-        "ready": active_team_up == expected,
-        "agents": sorted(active_team_up),
+        "ready": (
+            active_team_up == expected
+            and all(
+                status["online"] and status["provider_state"] == "provider_ready"
+                for status in agent_status.values()
+            )
+        ),
+        "agents": agent_status,
     }
 
 
@@ -2319,6 +2338,34 @@ async def heartbeat(agent_name: str, request: Request):
                 with mcp_bridge._presence_lock:
                     mcp_bridge._presence[canonical] = now
     return resp
+
+
+@app.post("/api/provider-state/{agent_name}")
+async def report_provider_state(agent_name: str, request: Request):
+    """Accept a loopback wrapper's sanitized provider readiness report."""
+    from provider_readiness import is_valid_provider_report
+
+    auth_inst = _resolve_authenticated_agent(request)
+    presented_token = _extract_agent_token(request)
+    if presented_token and not auth_inst:
+        return JSONResponse({"error": "stale_session"}, status_code=409)
+    if not auth_inst or auth_inst["name"] != agent_name:
+        return JSONResponse({"error": "authenticated agent session required"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    state = body.get("state")
+    reason_code = body.get("reason_code")
+    if not isinstance(state, str) or not isinstance(reason_code, str):
+        return JSONResponse({"error": "invalid provider state"}, status_code=400)
+    if not is_valid_provider_report(state, reason_code):
+        return JSONResponse({"error": "invalid provider state"}, status_code=400)
+    if not registry.report_provider_state(presented_token, state, reason_code):
+        return JSONResponse({"error": "stale_session"}, status_code=409)
+    return JSONResponse({"ok": True})
 
 
 # --- Open agent session in terminal ---

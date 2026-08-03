@@ -422,6 +422,27 @@ class AgentActivityIntegrationTests(unittest.TestCase):
             {"state": "IDLE", "event": None, "recent_events": []},
         )
 
+    def test_raw_provider_pane_text_is_rejected_without_activity_or_api_echo(self):
+        import app
+
+        pane_secret = "PANE_SECRET_63de"
+        request = SimpleNamespace(
+            headers={"authorization": "Bearer valid-token"},
+            json=mock.AsyncMock(return_value={
+                "state": "manual_action_required",
+                "reason_code": f"tool approval: {pane_secret}",
+            }),
+        )
+        with (
+            mock.patch.object(app, "registry", self.registry),
+            mock.patch.object(app, "activity_store", self.activity, create=True),
+        ):
+            response = asyncio.run(app.report_provider_state("codex-terra", request))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn(pane_secret.encode(), response.body)
+        self.assertNotIn(pane_secret, json.dumps(self.activity.snapshot("codex-terra")))
+
     def test_chat_activity_rejects_unauthenticated_invalid_state_and_reason(self):
         import mcp_bridge
 

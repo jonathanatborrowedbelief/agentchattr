@@ -615,6 +615,34 @@ def _auth_headers(token: str, *, include_json: bool = False) -> dict[str, str]:
     return headers
 
 
+def _report_provider_state(
+    server_port: int,
+    agent_name: str,
+    token: str,
+    state: str,
+    reason_code: str,
+) -> bool:
+    """Send only a classified provider state, never captured pane content."""
+    import urllib.parse
+    import urllib.request
+
+    body = json.dumps({"state": state, "reason_code": reason_code}).encode()
+    request = urllib.request.Request(
+        (
+            f"http://127.0.0.1:{server_port}/api/provider-state/"
+            f"{urllib.parse.quote(agent_name, safe='')}"
+        ),
+        method="POST",
+        data=body,
+        headers=_auth_headers(token, include_json=True),
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5):
+            return True
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Queue watcher
 # ---------------------------------------------------------------------------
@@ -1156,6 +1184,16 @@ def _run_main(cleanup: _RegistrationCleanup):
         )
         _watcher_thread.start()
 
+    def report_provider_state(state, reason_code):
+        current_name, _ = get_identity()
+        return _report_provider_state(
+            server_port,
+            current_name,
+            get_token(),
+            state,
+            reason_code,
+        )
+
     def _watcher_monitor():
         nonlocal _watcher_thread
         while True:
@@ -1246,6 +1284,8 @@ def _run_main(cleanup: _RegistrationCleanup):
         pid_holder=_agent_pid,
         inject_env=inject_env,
         inject_delay=agent_cfg.get("inject_delay", 0.3),
+        provider=provider,
+        report_provider_state=report_provider_state,
     )
     if sys.platform != "win32":
         run_kwargs["session_name"] = unix_session_name
