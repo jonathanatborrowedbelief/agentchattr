@@ -34,6 +34,7 @@ class SessionEngine:
         self._registry = registry
         self._activity = activity_store
         self._lock = threading.Lock()
+        self._dispatch_lock = threading.Lock()
 
         # Hook into message stream
         self._messages.on_message(self._on_message)
@@ -316,11 +317,16 @@ class SessionEngine:
         log.info("Session %d: triggering %s (%s) for phase '%s'",
                  claimed["id"], agent, role, phase["name"])
 
-        try:
-            self._trigger.trigger_sync(agent, channel=channel, prompt=prompt)
-        except Exception as exc:
-            log.error("Session %d: failed to trigger %s: %s",
-                      claimed["id"], agent, exc)
+        # Terminalization uses the same guard, but the store lock is released
+        # before the external trigger call.
+        with self._dispatch_lock:
+            if not self._can_dispatch(claimed, agent):
+                return
+            try:
+                self._trigger.trigger_sync(agent, channel=channel, prompt=prompt)
+            except Exception as exc:
+                log.error("Session %d: failed to trigger %s: %s",
+                          claimed["id"], agent, exc)
 
     def _interrupt_and_promote(self, session_id: int, reason: str):
         interrupted, promoted = self._terminalize_and_promote(
@@ -334,12 +340,13 @@ class SessionEngine:
 
     def _terminalize_and_promote(self, session_id: int, action: str, **kwargs):
         """Use the atomic store API, retaining compatibility with test doubles."""
-        terminalize = getattr(self._store, "terminalize_and_promote", None)
-        if terminalize:
-            return terminalize(session_id, action, **kwargs)
-        if action == "complete":
-            return self._store.complete(session_id, kwargs.get("output_message_id")), None
-        return self._store.interrupt(session_id, kwargs.get("reason", "ended by user")), None
+        with self._dispatch_lock:
+            terminalize = getattr(self._store, "terminalize_and_promote", None)
+            if terminalize:
+                return terminalize(session_id, action, **kwargs)
+            if action == "complete":
+                return self._store.complete(session_id, kwargs.get("output_message_id")), None
+            return self._store.interrupt(session_id, kwargs.get("reason", "ended by user")), None
 
     def _claim_waiting(self, session: dict, agent: str) -> dict | None:
         """Claim a trigger atomically, with compatibility for legacy doubles."""
@@ -348,6 +355,13 @@ class SessionEngine:
             return claim(session["id"], agent)
         self._store.set_waiting(session["id"], agent)
         return dict(session)
+
+    def _can_dispatch(self, session: dict, agent: str) -> bool:
+        """Confirm a claim under the dispatch guard just before delivery."""
+        can_dispatch = getattr(self._store, "can_dispatch", None)
+        if can_dispatch:
+            return can_dispatch(session["id"], agent)
+        return True
 
     def _trigger_promoted(self, session: dict | None):
         """Deliver the first turn only after a queued session owns the cast."""

@@ -283,6 +283,20 @@ class SessionStore:
         self._fire("update", result)
         return result
 
+    def can_dispatch(self, session_id: int, agent: str) -> bool:
+        """Verify a claimed turn remains eligible immediately before dispatch."""
+        with self._lock:
+            session = self._find(session_id)
+            if not session or session.get("state") != "waiting":
+                return False
+            if session.get("waiting_on") != agent:
+                return False
+            lease_key = session.get("lease_key")
+            if not lease_key:
+                return True
+            lease = self._leases.get(lease_key)
+            return bool(lease and lease.get("owner") == session_id)
+
     def pause(self, session_id: int) -> dict | None:
         """Pause session (human interruption)."""
         with self._lock:

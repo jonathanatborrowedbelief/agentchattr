@@ -473,6 +473,38 @@ class SharedCastLeaseTests(unittest.TestCase):
             self.assertEqual(store.get(queued["id"])["state"], "waiting")
             self.assertEqual([call[0] for call in trigger.calls], ["claude-lead"])
 
+    def test_trigger_dispatch_is_cancelled_when_owner_ends_after_claim(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            store = self._store(root)
+            owner = store.create("video-lab", "video", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
+            queued = store.create("publish-queue", "publish", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
+            trigger = _RecordingTrigger()
+            engine = SessionEngine(store, _RecordingMessageStore(), trigger, registry=_AgentRegistry({"claude-lead"}))
+            claim_returned = threading.Event()
+            allow_dispatch = threading.Event()
+            original_claim = engine._claim_waiting
+
+            def pause_after_old_claim(session, agent):
+                claimed = original_claim(session, agent)
+                if session["id"] == owner["id"]:
+                    claim_returned.set()
+                    allow_dispatch.wait(timeout=1)
+                return claimed
+
+            engine._claim_waiting = pause_after_old_claim
+            runner = threading.Thread(target=engine._trigger_current, args=(owner,))
+            runner.start()
+            self.assertTrue(claim_returned.wait(timeout=1))
+            engine.end_session(owner["id"])
+            allow_dispatch.set()
+            runner.join(timeout=1)
+
+            self.assertFalse(runner.is_alive())
+            self.assertEqual(store.get(owner["id"])["state"], "interrupted")
+            self.assertEqual(store.get(queued["id"])["state"], "waiting")
+            self.assertEqual([call[0] for call in trigger.calls], ["claude-lead"])
+
     def test_only_owner_triggers_and_restart_does_not_retrigger_waiter(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
