@@ -122,6 +122,69 @@ class StartupCanaryTests(unittest.TestCase):
                 "replayed_nonce",
             )
 
+    def test_terminal_states_erase_raw_nonces_but_digest_still_catches_replay(self):
+        from startup_canary import StartupCanary
+
+        def make_one(root, nonce, now=lambda: 100.0):
+            from agents import AgentTrigger
+
+            return StartupCanary(
+                AgentTrigger(SimpleNamespace(), data_dir=str(root)),
+                ("codex-sol",),
+                timeout_seconds=10,
+                now=now,
+                nonce_factory=lambda: nonce,
+            )
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+
+            passed = make_one(root / "passed", "pass-raw-nonce")
+            passed.begin()
+            self.assertTrue(passed.observe({
+                "sender": "codex-sol",
+                "text": "pass-raw-nonce",
+                "channel": StartupCanary.PRIVATE_CHANNEL,
+            }))
+            self.assertEqual(passed._nonces, {})
+            self.assertFalse(passed.observe({
+                "sender": "codex-sol",
+                "text": "pass-raw-nonce",
+                "channel": StartupCanary.PRIVATE_CHANNEL,
+            }))
+            self.assertEqual(passed._nonces, {})
+            self.assertEqual(
+                passed.snapshot()["agents"]["codex-sol"]["reason"],
+                "replayed_nonce",
+            )
+
+            blocked = make_one(root / "blocked", "block-raw-nonce")
+            blocked.begin()
+            blocked.observe({
+                "sender": "codex-sol",
+                "text": "incorrect",
+                "channel": StartupCanary.PRIVATE_CHANNEL,
+            })
+            self.assertEqual(blocked._nonces, {})
+
+            clock = [100.0]
+            timed_out = make_one(
+                root / "timeout",
+                "timeout-raw-nonce",
+                now=lambda: clock[0],
+            )
+            timed_out.begin()
+            clock[0] = 111.0
+            timed_out.snapshot()
+            self.assertEqual(timed_out._nonces, {})
+
+        for raw_nonce, canary in (
+            ("pass-raw-nonce", passed),
+            ("block-raw-nonce", blocked),
+            ("timeout-raw-nonce", timed_out),
+        ):
+            self.assertNotIn(raw_nonce, repr(canary.__dict__))
+
     def test_timeout_and_manual_action_results_are_sanitized_blockers(self):
         from startup_canary import StartupCanary
 
@@ -200,7 +263,7 @@ class StartupCanaryTests(unittest.TestCase):
             registered = registry.register("codex-sol")
             store = MessageStore(str(root / "messages.jsonl"))
             canary = mock.Mock()
-            canary.observe.return_value = True
+            canary.consume_response.return_value = (True, True)
             ctx = SimpleNamespace(
                 request_context=SimpleNamespace(
                     request=SimpleNamespace(
@@ -223,13 +286,145 @@ class StartupCanaryTests(unittest.TestCase):
                 )
 
         self.assertEqual(result, "Startup canary response accepted.")
-        canary.observe.assert_called_once_with({
-            "sender": "codex-sol",
-            "text": "raw-private-nonce",
-            "channel": StartupCanary.PRIVATE_CHANNEL,
-        })
+        canary.consume_response.assert_called_once_with(
+            "codex-sol",
+            "raw-private-nonce",
+            StartupCanary.PRIVATE_CHANNEL,
+            valid_response=True,
+        )
         self.assertEqual(store.get_recent(10), [])
         self.assertNotIn("raw-private-nonce", result)
+
+    def test_canary_nonce_sent_to_general_is_consumed_before_history_persistence(self):
+        import mcp_bridge
+        from registry import RuntimeRegistry
+        from store import MessageStore
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            registry = RuntimeRegistry(data_dir=str(root / "registry"))
+            registry.seed({"codex-sol": {"dedicated_identity": True}})
+            registered = registry.register("codex-sol")
+            store = MessageStore(str(root / "messages.jsonl"))
+            canary = self._make_canary(
+                root / "canary",
+                nonces=["one", "two", "raw-general-nonce", "four", "five"],
+            )
+            canary.begin()
+            ctx = SimpleNamespace(request_context=SimpleNamespace(request=SimpleNamespace(
+                headers={"authorization": f"Bearer {registered['token']}"},
+            )))
+            with (
+                mock.patch.object(mcp_bridge, "registry", registry),
+                mock.patch.object(mcp_bridge, "store", store),
+                mock.patch.object(mcp_bridge, "startup_canary", canary),
+                mock.patch.object(mcp_bridge, "activity_store", None),
+            ):
+                result = mcp_bridge.chat_send(
+                    sender="codex-sol",
+                    message="raw-general-nonce",
+                    choices=[],
+                    channel="general",
+                    ctx=ctx,
+                )
+
+        self.assertEqual(result, "Error: startup canary response rejected.")
+        self.assertEqual(store.get_recent(10), [])
+        self.assertNotIn("raw-general-nonce", result)
+        self.assertEqual(
+            canary.snapshot()["agents"]["codex-sol"]["reason"],
+            "wrong_channel",
+        )
+
+    def test_canary_nonce_sent_to_job_is_consumed_before_job_persistence(self):
+        import mcp_bridge
+        from jobs import JobStore
+        from registry import RuntimeRegistry
+        from store import MessageStore
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            registry = RuntimeRegistry(data_dir=str(root / "registry"))
+            registry.seed({"codex-sol": {"dedicated_identity": True}})
+            registered = registry.register("codex-sol")
+            store = MessageStore(str(root / "messages.jsonl"))
+            jobs = JobStore(str(root / "jobs.json"))
+            job = jobs.create(
+                title="Canary leak check",
+                job_type="job",
+                channel="general",
+                created_by="user",
+            )
+            canary = self._make_canary(
+                root / "canary",
+                nonces=["one", "two", "raw-job-nonce", "four", "five"],
+            )
+            canary.begin()
+            ctx = SimpleNamespace(request_context=SimpleNamespace(request=SimpleNamespace(
+                headers={"authorization": f"Bearer {registered['token']}"},
+            )))
+            with (
+                mock.patch.object(mcp_bridge, "registry", registry),
+                mock.patch.object(mcp_bridge, "store", store),
+                mock.patch.object(mcp_bridge, "jobs", jobs),
+                mock.patch.object(mcp_bridge, "startup_canary", canary),
+                mock.patch.object(mcp_bridge, "activity_store", None),
+                mock.patch.object(mcp_bridge, "router", None),
+                mock.patch.object(mcp_bridge, "agents", None),
+            ):
+                result = mcp_bridge.chat_send(
+                    sender="codex-sol",
+                    message="raw-job-nonce",
+                    choices=[],
+                    channel="general",
+                    job_id=job["id"],
+                    ctx=ctx,
+                )
+
+        self.assertEqual(result, "Error: startup canary response rejected.")
+        self.assertEqual(jobs.get_messages(job["id"]), [])
+        self.assertNotIn("raw-job-nonce", result)
+
+    def test_padded_nonce_is_consumed_but_rejected_as_not_exact(self):
+        import mcp_bridge
+        from registry import RuntimeRegistry
+        from store import MessageStore
+        from startup_canary import StartupCanary
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            registry = RuntimeRegistry(data_dir=str(root / "registry"))
+            registry.seed({"codex-sol": {"dedicated_identity": True}})
+            registered = registry.register("codex-sol")
+            store = MessageStore(str(root / "messages.jsonl"))
+            canary = self._make_canary(
+                root / "canary",
+                nonces=["one", "two", "raw-padded-nonce", "four", "five"],
+            )
+            canary.begin()
+            ctx = SimpleNamespace(request_context=SimpleNamespace(request=SimpleNamespace(
+                headers={"authorization": f"Bearer {registered['token']}"},
+            )))
+            with (
+                mock.patch.object(mcp_bridge, "registry", registry),
+                mock.patch.object(mcp_bridge, "store", store),
+                mock.patch.object(mcp_bridge, "startup_canary", canary),
+                mock.patch.object(mcp_bridge, "activity_store", None),
+            ):
+                result = mcp_bridge.chat_send(
+                    sender="codex-sol",
+                    message=" raw-padded-nonce ",
+                    choices=[],
+                    channel=StartupCanary.PRIVATE_CHANNEL,
+                    ctx=ctx,
+                )
+
+        self.assertEqual(result, "Error: startup canary response rejected.")
+        self.assertEqual(store.get_recent(10), [])
+        self.assertEqual(
+            canary.snapshot()["agents"]["codex-sol"]["reason"],
+            "nonce_mismatch",
+        )
 
     def test_rest_send_cannot_bypass_the_authenticated_chat_send_canary_path(self):
         import app
@@ -1317,6 +1512,73 @@ class TeamUpRuntimeTests(unittest.TestCase):
 
         self.assertFalse(payload["ready"])
         self.assertEqual(payload["canary"]["state"], "blocked")
+
+    def test_fast_deregister_reregister_ready_cycle_invalidates_passed_canary_without_health_poll(self):
+        import app
+        import mcp_bridge
+        from registry import RuntimeRegistry
+        from store import MessageStore
+
+        class Request:
+            def __init__(self, token="", body=None):
+                self.headers = {
+                    "authorization": f"Bearer {token}",
+                } if token else {}
+                self._body = body or {}
+
+            async def json(self):
+                return self._body
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            registry = RuntimeRegistry(data_dir=str(root / "registry"))
+            registry.seed({"codex-sol": {"dedicated_identity": True}})
+            first = registry.register("codex-sol")
+            store = MessageStore(str(root / "messages.jsonl"))
+            passed_canary = mock.Mock()
+            with (
+                mock.patch.object(app, "registry", registry),
+                mock.patch.object(app, "store", store),
+                mock.patch.object(app, "startup_canary", passed_canary),
+                mock.patch.object(mcp_bridge, "startup_canary", passed_canary),
+                mock.patch.object(mcp_bridge, "registry", registry),
+                mock.patch.object(mcp_bridge, "_presence", {}),
+                mock.patch.object(mcp_bridge, "_activity", {}),
+                mock.patch.object(mcp_bridge, "_activity_ts", {}),
+                mock.patch.object(mcp_bridge, "_cursors", {}),
+                mock.patch.object(mcp_bridge, "_roles", {}),
+                mock.patch.object(mcp_bridge, "activity_store", None),
+                mock.patch.object(mcp_bridge, "_CURSORS_FILE", None),
+            ):
+                deregistered = asyncio.run(app.deregister_agent(
+                    "codex-sol",
+                    Request(first["token"]),
+                ))
+                self.assertEqual(deregistered.status_code, 200)
+                self.assertIsNone(app.startup_canary)
+                self.assertIsNone(mcp_bridge.startup_canary)
+
+                registered_response = asyncio.run(app.register_agent(Request(
+                    body={"base": "codex-sol"},
+                )))
+                self.assertEqual(registered_response.status_code, 200)
+                second = json.loads(registered_response.body)
+                self.assertNotEqual(first["token"], second["token"])
+
+                ready_response = asyncio.run(app.report_provider_state(
+                    "codex-sol",
+                    Request(second["token"], {
+                        "state": "provider_ready",
+                        "reason_code": "ready_prompt",
+                    }),
+                ))
+                self.assertEqual(ready_response.status_code, 200)
+                self.assertIsNone(app.startup_canary)
+
+        self.assertEqual(
+            registry.get_instance("codex-sol")["provider_state"],
+            "provider_ready",
+        )
 
     def test_queue_lock_serializes_append_and_claim(self):
         import threading

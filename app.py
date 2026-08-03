@@ -2285,6 +2285,8 @@ async def register_agent(request: Request):
         return JSONResponse({"error": str(exc)}, status_code=409)
     if result is None:
         return JSONResponse({"error": f"unknown base: {base}"}, status_code=400)
+    if result.get("name") in TEAM_UP_IDENTITIES:
+        _reset_startup_canary()
     # Touch presence so the instance doesn't immediately time out
     import mcp_bridge
     with mcp_bridge._presence_lock:
@@ -2329,6 +2331,8 @@ async def deregister_agent(name: str, request: Request):
     result = registry.deregister(name)
     if result is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    if name in TEAM_UP_IDENTITIES:
+        _reset_startup_canary()
     # Clean up runtime state (presence, activity, cursors, rename chains)
     import mcp_bridge
     mcp_bridge.purge_identity(name)

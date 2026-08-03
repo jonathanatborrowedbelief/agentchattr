@@ -227,23 +227,31 @@ def chat_send(
     if not message.strip() and not image_path:
         return "Empty message, not sent."
 
-    if channel == StartupCanary.PRIVATE_CHANNEL:
-        if activity_instance is None or startup_canary is None:
-            return "Error: authenticated startup canary response required."
-        if choices or image_path or reply_to >= 0 or job_id:
-            return "Error: startup canary response must be plain text."
-        accepted = startup_canary.observe({
-            "sender": sender,
-            "text": message.strip(),
-            "channel": StartupCanary.PRIVATE_CHANNEL,
-        })
+    if startup_canary is not None:
+        consumed, accepted = startup_canary.consume_response(
+            sender,
+            message,
+            channel,
+            valid_response=(
+                activity_instance is not None
+                and not choices
+                and not image_path
+                and reply_to < 0
+                and not job_id
+            ),
+        )
+    else:
+        consumed, accepted = False, False
+    if consumed:
         with _presence_lock:
             _presence[sender] = time.time()
-        if activity_store:
+        if activity_store and activity_instance:
             activity_store.mark_done(activity_instance["name"], "response_posted")
         if accepted:
             return "Startup canary response accepted."
         return "Error: startup canary response rejected."
+    if channel == StartupCanary.PRIVATE_CHANNEL:
+        return "Error: authenticated startup canary response required."
 
     # Job-scoped send: post into a job conversation instead of main timeline
     if job_id and jobs:
