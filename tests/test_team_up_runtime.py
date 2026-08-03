@@ -837,6 +837,24 @@ class TeamUpRuntimeTests(unittest.TestCase):
             _merge_launch_args(config["agents"]["codex"], []),
         )
 
+    def test_dedicated_codex_injection_waits_for_multiline_paste(self):
+        from config_loader import load_config
+
+        config = load_config(Path(__file__).parents[1])
+
+        self.assertEqual(
+            {
+                identity: config["agents"][identity].get("inject_delay")
+                for identity in ("codex-luna", "codex-terra", "codex-sol")
+            },
+            {
+                "codex-luna": 1.0,
+                "codex-terra": 1.0,
+                "codex-sol": 1.0,
+            },
+        )
+        self.assertIsNone(config["agents"]["codex"].get("inject_delay"))
+
     def test_claude_lead_injected_config_excludes_project_mcps(self):
         from config_loader import load_config
         from wrapper import _build_provider_launch

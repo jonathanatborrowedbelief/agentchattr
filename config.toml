@@ -44,6 +44,7 @@ launch_args = [
     "-c", "mcp_servers.magic.enabled=false",
     "-c", "mcp_servers.apify.enabled=false",
 ]
+inject_delay = 1.0
 instructions_file = "Codex.md"
 
 [agents.codex-terra]
@@ -59,6 +60,7 @@ launch_args = [
     "-c", "mcp_servers.magic.enabled=false",
     "-c", "mcp_servers.apify.enabled=false",
 ]
+inject_delay = 1.0
 instructions_file = "Codex.md"
 
 [agents.codex-luna]
@@ -74,6 +76,7 @@ launch_args = [
     "-c", "mcp_servers.magic.enabled=false",
     "-c", "mcp_servers.apify.enabled=false",
 ]
+inject_delay = 1.0
 instructions_file = "Codex.md"
 
 [agents.gemini]
