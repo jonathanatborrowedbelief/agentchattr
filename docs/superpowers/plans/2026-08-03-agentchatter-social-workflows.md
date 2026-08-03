@@ -97,10 +97,10 @@ Generate one cryptographically random nonce per exact identity. Send through the
 **Files:** create `session_templates/video-lab.json`, `session_templates/publish-queue.json`; modify `app.py`, `session_store.py`, `static/channels.js`, `tests/test_team_up_session.py`; create `tests/test_social_workflow_templates.py`
 
 - [ ] Raise template validation from six to seven phases without loosening role, prompt, or single-output validation.
-- [ ] Create seven-phase templates using the exact `team-up-v2` roles/default cast:
+- [ ] Create seven-phase templates using the exact five `team-up-v2` agent roles/default cast. Add a sixth `approver` role only to `publish-queue`, with `default_cast.approver = "Jonathan"`:
   - `video-lab`: intake/goal, visual teardown, evidence/decomposition, recreation decision, production package, integrate/QC, release.
   - `publish-queue`: import, preflight, creative QC, human approval, execute, reconcile, audit.
-- [ ] Give both `default_channel` and `lease_key: "team-up-shared-cast"`. The human approval phase must wait for Jonathan and must not auto-trigger an agent.
+- [ ] Give both `default_channel` and `lease_key: "team-up-shared-cast"`. The human approval phase uses participant `approver`; because `Jonathan` is not a registered agent, the existing human-turn path must wait without queue-triggering an agent.
 - [ ] Seed `video-lab` and `publish-queue` into loaded settings on every start while preserving user channels and the eight-channel cap. Treat them as protected operational channels in UI rename/delete controls.
 - [ ] Test template validation, exact cast, prompts under validator limits, fresh-store reload, settings restart, default channel, and seven-phase advancement.
 - [ ] Run `python3 -m pytest tests/test_team_up_session.py tests/test_social_workflow_templates.py -q`. Expected: pass.
