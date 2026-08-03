@@ -4,7 +4,8 @@
 
 Permanent Team Up v2 and the social-workflow templates are implemented and
 reviewed on `codex/team-up-v2`. The automated Task 6 reliability gates pass,
-but the required live production-path smoke is blocked on provider startup.
+but the required live production-path smoke is blocked on three Codex canary
+response timeouts.
 The web UI is `http://127.0.0.1:8300`; MCP HTTP is
 `http://127.0.0.1:8200`.
 
@@ -81,10 +82,20 @@ or persisted by the launcher.
   rejected rather than suffixed. After the 60-second crash cleanup, all five
   wrappers re-registered as exactly `claude-lead`, `gemini-video`, `codex-luna`,
   `codex-terra`, and `codex-sol`; no `-2` identity appeared.
-- The Task 6 live canary did not start. `claude-lead` and `gemini-video`
-  remained `registered/unknown_screen`; all three Codex identities reported
-  `manual_action_required/mcp_startup_failure`. Health remained `ready=false`
-  with a blocked canary and no nonce results.
+- Commit `15c0cf5` recognizes the real provider-specific Claude, Gemini, and
+  Codex composers with multiline horizontal-whitespace patterns. It also keeps
+  unrelated project MCPs out of Claude Lead's strict config and disables the
+  optional global `magic` and `apify` MCPs only for the three dedicated Codex
+  wrappers.
+- One graceful five-wrapper restart after `15c0cf5` brought all five exact
+  identities online as `provider_ready/ready_prompt`, with no `-2` identities.
+  The real private canary passed for `claude-lead` and `gemini-video`, then
+  blocked on `response_timeout` for `codex-luna`, `codex-terra`, and
+  `codex-sol`.
+- Read-only, nonce-free diagnosis found all three Codex panes back at their real
+  composer prompts with no detected MCP transport, unknown-tool, or approval
+  error. Their queue files had no pending records, so the canary deliveries were
+  claimed but produced no authenticated `chat_send` response before timeout.
 - Because the production-path readiness gate stayed closed, no `video-lab` or
   `publish-queue` fixture session was started and no media or publishing action
   ran. The shared-cast live wait/promotion and live private-canary surface audit
@@ -101,9 +112,9 @@ or persisted by the launcher.
 ## Verification
 
 - Task 6 focused runtime/session/activity/archive/social-template suite:
-  `121 passed, 10 subtests passed`.
+  `125 passed, 16 subtests passed`.
 - Node activity-status suite: 8/8 passed.
-- Full Python discovery: `121 passed, 10 subtests passed`.
+- Full Python discovery: `125 passed, 16 subtests passed`.
 - Archive regression suite: 8/8 passed. Commit `60fc4db` replaces the removed
   `MessageStore._save()` call with a supported bulk flush after releasing the
   non-reentrant store lock, and adds a reload-based breadcrumb persistence test.
@@ -123,10 +134,11 @@ or persisted by the launcher.
 
 ## Remaining external constraints
 
-- Live Task 6 blocker: all three Codex providers require manual action for
-  `mcp_startup_failure`; Claude and Gemini remain on sanitized
-  `unknown_screen`. Resolve those provider panes manually, then rerun the exact
-  five-provider readiness/canary gate.
+- Live Task 6 blocker: the provider gate is green for all five identities and
+  the real canary is green for Claude/Gemini, but all three Codex identities
+  timed out after claiming their queue deliveries without an authenticated
+  response. Diagnose that Codex queue-injection-to-tool-call gap without
+  weakening or bypassing the Agent Chatter canary.
 - The preferred `gemini-2.5-pro` credential quota is currently exhausted.
 - Gemini CLI 0.52 no longer offers `gemini-2.5-flash` as an interactive manual
   model and routed that override to quota-blocked `gemini-3.5-flash`.
@@ -136,12 +148,12 @@ or persisted by the launcher.
 
 ## Next
 
-Clear the manual provider blockers, rerun the isolated launcher, and require all
-five exact identities to reach `provider_ready` and pass the real private nonce
-canary. Then run harmless `video-lab` and `publish-queue` fixtures to prove the
-second waits for `team-up-shared-cast` and promotes after the first ends, and
-verify the private channel/nonces are absent from UI, history, archive,
-summaries, and MCP reads.
+Resolve the Codex canary response-timeout path, then require all five exact
+identities to remain `provider_ready` and pass the real private nonce canary.
+Then run harmless `video-lab` and `publish-queue` fixtures to prove the second
+waits for `team-up-shared-cast` and promotes after the first ends, and verify the
+private channel/nonces are absent from UI, history, archive, summaries, and MCP
+reads.
 
 The video-lab plan may execute only after that canary passes and `video-lab`
 acquires the shared cast. Publishing code may proceed independently, but no
