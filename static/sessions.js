@@ -305,7 +305,10 @@ function updateSessionBar() {
     if (endBtn) endBtn.style.display = '';
 
     const waitingAgent = s.current_agent || s.waiting_on;
-    if (s.state === 'waiting' && waitingAgent) {
+    if (s.state === 'waiting_for_cast') {
+        waitingEl.textContent = 'Waiting for shared cast';
+        waitingEl.style.display = '';
+    } else if (s.state === 'waiting' && waitingAgent) {
         waitingEl.textContent = `Waiting for ${waitingAgent}`;
         waitingEl.style.display = '';
     } else if (s.state === 'paused') {

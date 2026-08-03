@@ -50,13 +50,14 @@ class _SessionEngine:
     def __init__(self):
         self.started = None
 
-    def start_session(self, template_id, channel, cast, started_by, goal):
+    def start_session(self, template_id, channel, cast, started_by, goal, lease_key=None):
         self.started = {
             "template_id": template_id,
             "channel": channel,
             "cast": cast,
             "started_by": started_by,
             "goal": goal,
+            "lease_key": lease_key,
         }
         return {"id": 1, **self.started}
 
@@ -156,6 +157,7 @@ class TeamUpBackendCastingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["cast"], DEFAULT_CAST)
         self.assertEqual(started["cast"], DEFAULT_CAST)
         self.assertEqual(started["goal"], "Ship the approved goal")
+        self.assertEqual(started["lease_key"], "team-up-shared-cast")
 
     async def test_missing_preferred_agents_fall_back_before_reusing(self):
         template = {
@@ -341,6 +343,104 @@ class TeamUpSessionAdvancementTests(unittest.TestCase):
             completed = sessions.get(session["id"])
             self.assertEqual(completed["state"], "complete")
             self.assertEqual(completed["output_message_id"], 103)
+
+
+class SharedCastLeaseTests(unittest.TestCase):
+    def _store(self, root):
+        templates_dir = root / "templates"
+        templates_dir.mkdir()
+        for template_id in ("video-lab", "publish-queue"):
+            (templates_dir / f"{template_id}.json").write_text(
+                json.dumps({
+                    "id": template_id,
+                    "name": template_id,
+                    "roles": ["lead"],
+                    "phases": [{"name": "Work", "prompt": "Work.", "participants": ["lead"]}],
+                }),
+                encoding="utf-8",
+            )
+        return SessionStore(str(root / "session_runs.json"), templates_dir=str(templates_dir))
+
+    def test_shared_cast_owner_and_fifo_waiter_persist_across_restart(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            store = self._store(root)
+            owner = store.create("video-lab", "video", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
+            queued = store.create("publish-queue", "publish", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
+
+            self.assertEqual(store.get_lease_owner("team-up-shared-cast"), owner["id"])
+            self.assertEqual(queued["state"], "waiting_for_cast")
+
+            restarted = SessionStore(str(root / "session_runs.json"), templates_dir=str(root / "templates"))
+            self.assertEqual(restarted.get_lease_owner("team-up-shared-cast"), owner["id"])
+            self.assertEqual(restarted.get(queued["id"])["state"], "waiting_for_cast")
+
+    def test_release_promotes_one_fifo_waiter_only_once(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            store = self._store(root)
+            first = store.create("video-lab", "video", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
+            second = store.create("publish-queue", "publish", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
+            third = store.create("video-lab", "review", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
+
+            store.complete(first["id"])
+            promoted = store.release_and_promote(first["id"])
+            duplicate = store.release_and_promote(first["id"])
+
+            self.assertEqual(promoted["id"], second["id"])
+            self.assertEqual(promoted["state"], "active")
+            self.assertIsNone(duplicate)
+            self.assertEqual(store.get_lease_owner("team-up-shared-cast"), second["id"])
+            self.assertEqual(store.get(third["id"])["state"], "waiting_for_cast")
+
+            store.interrupt(second["id"])
+            promoted_after_interrupt = store.release_and_promote(second["id"])
+            self.assertEqual(promoted_after_interrupt["id"], third["id"])
+            self.assertEqual(store.get_lease_owner("team-up-shared-cast"), third["id"])
+
+    def test_only_owner_triggers_and_restart_does_not_retrigger_waiter(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            store = self._store(root)
+            messages = _RecordingMessageStore()
+            trigger = _RecordingTrigger()
+            engine = SessionEngine(store, messages, trigger, registry=_AgentRegistry({"claude-lead"}))
+
+            owner = engine.start_session("video-lab", "video", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
+            queued = engine.start_session("publish-queue", "publish", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
+            engine.resume_active_sessions()
+
+            self.assertEqual(queued["state"], "waiting_for_cast")
+            self.assertEqual([call[0] for call in trigger.calls], ["claude-lead"])
+
+            store.complete(owner["id"])
+            promoted = store.release_and_promote(owner["id"])
+            engine._trigger_current(promoted)
+            self.assertEqual([call[0] for call in trigger.calls], ["claude-lead", "claude-lead"])
+
+
+class SharedCastStartApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_api_returns_queued_session_instead_of_conflict(self):
+        template = {"id": "publish-queue", "roles": ["lead"], "default_cast": {"lead": "claude-lead"}}
+        engine = _SessionEngine()
+        engine.start_session = lambda *args, **kwargs: {
+            "id": 2,
+            "template_id": "publish-queue",
+            "channel": "publish",
+            "state": "waiting_for_cast",
+        }
+        request = _Request({"template_id": "publish-queue", "channel": "publish", "cast": {"lead": "claude-lead"}})
+        with mock.patch.multiple(
+            app,
+            session_store=_SessionStore(template),
+            session_engine=engine,
+            registry=_Registry(["claude-lead"]),
+            store=_MessageStore(),
+        ):
+            response = await app.start_session(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.body)["state"], "waiting_for_cast")
 
 
 if __name__ == "__main__":

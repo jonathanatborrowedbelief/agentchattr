@@ -125,7 +125,8 @@ function _renderChannelSidebar(container) {
                 sessionRow.className = 'channel-sidebar-session';
                 const sessionLabel = document.createElement('span');
                 sessionLabel.className = 'channel-sidebar-session-label';
-                sessionLabel.textContent = session.template_name || 'Session';
+                const stateLabel = session.state === 'waiting_for_cast' ? ' — waiting for shared cast' : '';
+                sessionLabel.textContent = (session.template_name || 'Session') + stateLabel;
                 sessionRow.appendChild(sessionLabel);
                 const endBtn = document.createElement('button');
                 endBtn.className = 'channel-session-end';

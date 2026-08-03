@@ -14,6 +14,7 @@ class SessionStore:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._sessions: list[dict] = []
+        self._leases: dict[str, dict] = {}
         self._next_id = 1
         self._lock = threading.Lock()
         self._callbacks: list = []
@@ -50,15 +51,23 @@ class SessionStore:
         try:
             raw = json.loads(self._path.read_text("utf-8"))
             if isinstance(raw, list):
+                # Session runs before shared-cast leases were persisted as a list.
                 self._sessions = raw
-                if self._sessions:
-                    self._next_id = max(s["id"] for s in self._sessions) + 1
+            elif isinstance(raw, dict):
+                self._sessions = raw.get("sessions", [])
+                self._leases = raw.get("leases", {})
+            if self._sessions:
+                self._next_id = max(s["id"] for s in self._sessions) + 1
         except (json.JSONDecodeError, KeyError):
             self._sessions = []
 
     def _save(self):
         self._path.write_text(
-            json.dumps(self._sessions, indent=2, ensure_ascii=False) + "\n",
+            json.dumps(
+                {"sessions": self._sessions, "leases": self._leases},
+                indent=2,
+                ensure_ascii=False,
+            ) + "\n",
             "utf-8",
         )
 
@@ -139,7 +148,7 @@ class SessionStore:
     # --- Session lifecycle ---
 
     def create(self, template_id: str, channel: str, cast: dict,
-               started_by: str, goal: str = "") -> dict | None:
+               started_by: str, goal: str = "", lease_key: str | None = None) -> dict | None:
         """Create and persist a new session run."""
         tmpl = self._templates.get(template_id)
         if not tmpl:
@@ -148,7 +157,7 @@ class SessionStore:
         with self._lock:
             # One active session per channel
             for s in self._sessions:
-                if s.get("channel") == channel and s.get("state") in ("active", "waiting", "paused"):
+                if s.get("channel") == channel and s.get("state") in ("active", "waiting", "waiting_for_cast", "paused"):
                     return None
 
             session = {
@@ -167,6 +176,14 @@ class SessionStore:
                 "output_message_id": None,
                 "goal": goal.strip()[:500],
             }
+            if lease_key:
+                lease = self._leases.setdefault(lease_key, {"owner": None, "queue": []})
+                session["lease_key"] = lease_key
+                if lease.get("owner") is None:
+                    lease["owner"] = session["id"]
+                else:
+                    session["state"] = "waiting_for_cast"
+                    lease.setdefault("queue", []).append(session["id"])
             self._next_id += 1
             self._sessions.append(session)
             self._save()
@@ -185,7 +202,7 @@ class SessionStore:
         """Get the active/waiting/paused session for a channel."""
         with self._lock:
             for s in self._sessions:
-                if s.get("channel") == channel and s.get("state") in ("active", "waiting", "paused"):
+                if s.get("channel") == channel and s.get("state") in ("active", "waiting", "waiting_for_cast", "paused"):
                     return dict(s)
             return None
 
@@ -293,10 +310,52 @@ class SessionStore:
             session["state"] = "interrupted"
             session["interrupt_reason"] = reason
             session["updated_at"] = time.time()
+            lease_key = session.get("lease_key")
+            if lease_key:
+                lease = self._leases.get(lease_key)
+                if lease and session_id in lease.get("queue", []):
+                    lease["queue"].remove(session_id)
             self._save()
             result = dict(session)
         self._fire("interrupt", result)
         return result
+
+    def get_lease_owner(self, lease_key: str) -> int | None:
+        """Return the current owner ID for a persisted lease."""
+        with self._lock:
+            lease = self._leases.get(lease_key)
+            return lease.get("owner") if lease else None
+
+    def release_and_promote(self, session_id: int) -> dict | None:
+        """Atomically release a lease owner and promote the next queued session."""
+        with self._lock:
+            session = self._find(session_id)
+            if not session:
+                return None
+            lease_key = session.get("lease_key")
+            lease = self._leases.get(lease_key) if lease_key else None
+            if not lease or lease.get("owner") != session_id:
+                return None
+
+            lease["owner"] = None
+            promoted = None
+            queue = lease.setdefault("queue", [])
+            while queue:
+                next_id = queue.pop(0)
+                candidate = self._find(next_id)
+                if candidate and candidate.get("state") == "waiting_for_cast":
+                    candidate["state"] = "active"
+                    candidate.pop("waiting_on", None)
+                    candidate["updated_at"] = time.time()
+                    lease["owner"] = candidate["id"]
+                    promoted = dict(candidate)
+                    break
+            self._save()
+
+        # Callbacks may re-enter the store, so fire only after unlocking.
+        if promoted:
+            self._fire("update", promoted)
+        return promoted
 
     def _find(self, session_id: int) -> dict | None:
         """Find session by ID (caller must hold lock)."""

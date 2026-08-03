@@ -41,7 +41,7 @@ class SessionEngine:
     # --- Public API ---
 
     def start_session(self, template_id: str, channel: str, cast: dict,
-                      started_by: str, goal: str = "") -> dict | None:
+                      started_by: str, goal: str = "", lease_key: str | None = None) -> dict | None:
         """Start a new session. Returns the session dict or None on failure."""
         session = self._store.create(
             template_id=template_id,
@@ -49,6 +49,7 @@ class SessionEngine:
             cast=cast,
             started_by=started_by,
             goal=goal,
+            lease_key=lease_key,
         )
         if not session:
             return None
@@ -56,8 +57,10 @@ class SessionEngine:
         log.info("Session %d started: %s in #%s", session["id"],
                  session["template_name"], channel)
 
-        # Trigger the first participant
-        self._trigger_current(session)
+        # Queued sessions receive their first participant prompt only after
+        # they are promoted to the shared-cast owner.
+        if session.get("state") == "active":
+            self._trigger_current(session)
         return session
 
     def emit_current_phase_banner(self, session: dict):
@@ -92,6 +95,7 @@ class SessionEngine:
             if expected_agent and self._activity:
                 self._activity.mark_blocked(expected_agent, "session_paused")
             log.info("Session %d interrupted: %s", session_id, reason)
+            self._trigger_promoted(self._store.release_and_promote(session_id))
         return session
 
     def get_active(self, channel: str) -> dict | None:
@@ -113,7 +117,7 @@ class SessionEngine:
         """List all active/waiting/paused sessions, enriched for the frontend."""
         active = []
         for session in self._store.list_all():
-            if session.get("state") in ("active", "waiting", "paused"):
+            if session.get("state") in ("active", "waiting", "waiting_for_cast", "paused"):
                 active.append(self._enrich(session))
         return active
 
@@ -149,7 +153,7 @@ class SessionEngine:
             return
 
         session = self._store.get_active(channel)
-        if not session:
+        if not session or session.get("state") not in ("active", "waiting", "paused"):
             return
 
         expected_agent = self._get_expected_agent(session)
@@ -202,7 +206,7 @@ class SessionEngine:
         """Advance the current session state while the engine lock is held."""
         tmpl = self._store.get_template(session["template_id"])
         if not tmpl:
-            self._store.interrupt(session["id"], "template not found")
+            self._interrupt_and_promote(session["id"], "template not found")
             return
 
         phases = tmpl.get("phases", [])
@@ -211,6 +215,7 @@ class SessionEngine:
 
         if phase_idx >= len(phases):
             self._store.complete(session["id"], message_id)
+            self._trigger_promoted(self._store.release_and_promote(session["id"]))
             return
 
         phase = phases[phase_idx]
@@ -244,10 +249,14 @@ class SessionEngine:
                 is_output = phase.get("is_output", False)
                 self._store.complete(session["id"],
                                      message_id if is_output else None)
+                self._trigger_promoted(self._store.release_and_promote(session["id"]))
                 log.info("Session %d complete", session["id"])
 
     def _trigger_current(self, session: dict):
         """Trigger the agent whose turn it is."""
+        lease_key = session.get("lease_key")
+        if lease_key and self._store.get_lease_owner(lease_key) != session.get("id"):
+            return
         tmpl = self._store.get_template(session["template_id"])
         if not tmpl:
             return
@@ -271,7 +280,7 @@ class SessionEngine:
 
         if not agent:
             log.warning("Session %d: no agent cast for role '%s'", session["id"], role)
-            self._store.interrupt(session["id"], f"no agent for role '{role}'")
+            self._interrupt_and_promote(session["id"], f"no agent for role '{role}'")
             if self._activity:
                 self._activity.mark_blocked(role, "missing_cast")
             return
@@ -297,6 +306,17 @@ class SessionEngine:
         except Exception as exc:
             log.error("Session %d: failed to trigger %s: %s",
                       session["id"], agent, exc)
+
+    def _interrupt_and_promote(self, session_id: int, reason: str):
+        interrupted = self._store.interrupt(session_id, reason)
+        if interrupted:
+            self._trigger_promoted(self._store.release_and_promote(session_id))
+        return interrupted
+
+    def _trigger_promoted(self, session: dict | None):
+        """Deliver the first turn only after a queued session owns the cast."""
+        if session:
+            self._trigger_current(session)
 
     def _assemble_prompt(self, session: dict, tmpl: dict, phase: dict,
                          role: str) -> str:

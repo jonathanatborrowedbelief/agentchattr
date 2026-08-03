@@ -2619,9 +2619,19 @@ async def start_session(request: Request):
                 status_code=400,
             )
 
-    session = session_engine.start_session(template_id, channel, cast, started_by, goal)
+    session = session_engine.start_session(
+        template_id,
+        channel,
+        cast,
+        started_by,
+        goal,
+        lease_key="team-up-shared-cast",
+    )
     if not session:
         return JSONResponse({"error": "could not start session (one may already be active)"}, status_code=409)
+
+    if session.get("state") == "waiting_for_cast":
+        return JSONResponse(session)
 
     # Add start banner to chat (only after confirmed success)
     store.add(
