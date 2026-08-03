@@ -108,7 +108,9 @@ Generate one cryptographically random nonce per exact identity. Send through the
 
 ## Task 6: Full reliability smoke and operational handoff
 
-**Files:** modify `CONTEXT.md`; test-only changes if failures reveal plan-owned defects
+**Files:** modify `CONTEXT.md`; repair `archive.py` only for the known baseline persistence failure; test-only changes if failures reveal plan-owned defects
+
+- [ ] Repair the known baseline archive regression before the full-suite gate: `archive.py` calls removed `MessageStore._save()` while remapping imported job breadcrumbs. Persist the patched in-memory messages through the supported bulk rewrite path without recursively taking `MessageStore._lock`; keep both existing archive regression tests green.
 
 - [ ] Run sequentially:
 
