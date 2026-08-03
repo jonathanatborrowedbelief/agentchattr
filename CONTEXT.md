@@ -2,8 +2,10 @@
 
 ## Status
 
-Permanent Team Up v2 is implemented, reviewed, smoke-tested, and live from the
-`codex/team-up-v2` worktree. The web UI is `http://127.0.0.1:8300`; MCP HTTP is
+Permanent Team Up v2 and the social-workflow templates are implemented and
+reviewed on `codex/team-up-v2`. The automated Task 6 reliability gates pass,
+but the required live production-path smoke is blocked on provider startup.
+The web UI is `http://127.0.0.1:8300`; MCP HTTP is
 `http://127.0.0.1:8200`.
 
 ## Permanent cast
@@ -73,6 +75,20 @@ or persisted by the launcher.
   `GEMINI_FINAL_OK`.
 - The post-lock clean relaunch verified live chatter responses
   `CLAUDE_LIVE_A08C13F_OK` and `GEMINI_LIVE_A08C13F_OK`.
+- Task 6 restarted the isolated server on the current branch and attempted the
+  five-wrapper relaunch inside the identity grace window. The abrupt owner-pane
+  stop left live registrations, so the immediate replacements were correctly
+  rejected rather than suffixed. After the 60-second crash cleanup, all five
+  wrappers re-registered as exactly `claude-lead`, `gemini-video`, `codex-luna`,
+  `codex-terra`, and `codex-sol`; no `-2` identity appeared.
+- The Task 6 live canary did not start. `claude-lead` and `gemini-video`
+  remained `registered/unknown_screen`; all three Codex identities reported
+  `manual_action_required/mcp_startup_failure`. Health remained `ready=false`
+  with a blocked canary and no nonce results.
+- Because the production-path readiness gate stayed closed, no `video-lab` or
+  `publish-queue` fixture session was started and no media or publishing action
+  ran. The shared-cast live wait/promotion and live private-canary surface audit
+  remain pending rather than being bypassed.
 
 ## Activity feed
 
@@ -84,10 +100,13 @@ or persisted by the launcher.
 
 ## Verification
 
-- Focused runtime/session/activity Python suite: 59/59 passed.
+- Task 6 focused runtime/session/activity/archive/social-template suite:
+  `121 passed, 10 subtests passed`.
 - Node activity-status suite: 8/8 passed.
-- Full Python discovery: 62/64 passed; the only two errors are pre-existing
-  archive tests at `archive.py:355` because `MessageStore._save` does not exist.
+- Full Python discovery: `121 passed, 10 subtests passed`.
+- Archive regression suite: 8/8 passed. Commit `60fc4db` replaces the removed
+  `MessageStore._save()` call with a supported bulk flush after releasing the
+  non-reentrant store lock, and adds a reload-based breadcrumb persistence test.
 - Python compileall, JavaScript syntax checks, launcher shell syntax, and
   `git diff --check`: passed.
 - Provider versions: Claude Code `2.1.220`, Gemini CLI `0.52.0`, Codex CLI
@@ -104,14 +123,26 @@ or persisted by the launcher.
 
 ## Remaining external constraints
 
+- Live Task 6 blocker: all three Codex providers require manual action for
+  `mcp_startup_failure`; Claude and Gemini remain on sanitized
+  `unknown_screen`. Resolve those provider panes manually, then rerun the exact
+  five-provider readiness/canary gate.
 - The preferred `gemini-2.5-pro` credential quota is currently exhausted.
 - Gemini CLI 0.52 no longer offers `gemini-2.5-flash` as an interactive manual
   model and routed that override to quota-blocked `gemini-3.5-flash`.
 - The verified live fallback is `gemini-3.1-flash-lite`; the earlier native-video
   workflow passed on Gemini Flash.
-- The two pre-existing archive test errors are outside Team Up v2.
+- The archive baseline regression is repaired in `60fc4db`.
 
 ## Next
 
-Choose whether to merge `codex/team-up-v2` into its base branch, create a pull
-request, or keep the worktree branch as-is.
+Clear the manual provider blockers, rerun the isolated launcher, and require all
+five exact identities to reach `provider_ready` and pass the real private nonce
+canary. Then run harmless `video-lab` and `publish-queue` fixtures to prove the
+second waits for `team-up-shared-cast` and promotes after the first ends, and
+verify the private channel/nonces are absent from UI, history, archive,
+summaries, and MCP reads.
+
+The video-lab plan may execute only after that canary passes and `video-lab`
+acquires the shared cast. Publishing code may proceed independently, but no
+`publish-queue` workflow start may bypass this gate.
