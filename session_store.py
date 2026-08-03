@@ -260,6 +260,29 @@ class SessionStore:
         self._fire("update", result)
         return result
 
+    def claim_waiting(self, session_id: int, agent: str) -> dict | None:
+        """Claim an eligible session turn before delivering its participant prompt.
+
+        The state and lease-owner checks share the store lock so a terminal
+        handoff cannot revive or re-trigger a former owner.
+        """
+        with self._lock:
+            session = self._find(session_id)
+            if not session or session.get("state") != "active":
+                return None
+            lease_key = session.get("lease_key")
+            if lease_key:
+                lease = self._leases.get(lease_key)
+                if not lease or lease.get("owner") != session_id:
+                    return None
+            session["state"] = "waiting"
+            session["waiting_on"] = agent
+            session["updated_at"] = time.time()
+            self._save()
+            result = dict(session)
+        self._fire("update", result)
+        return result
+
     def pause(self, session_id: int) -> dict | None:
         """Pause session (human interruption)."""
         with self._lock:
@@ -288,37 +311,60 @@ class SessionStore:
 
     def complete(self, session_id: int, output_message_id: int | None = None) -> dict | None:
         """Mark session as complete."""
-        with self._lock:
-            session = self._find(session_id)
-            if not session:
-                return None
-            session["state"] = "complete"
-            session["updated_at"] = time.time()
-            if output_message_id is not None:
-                session["output_message_id"] = output_message_id
-            self._save()
-            result = dict(session)
-        self._fire("complete", result)
-        return result
+        completed, _ = self.terminalize_and_promote(
+            session_id,
+            "complete",
+            output_message_id=output_message_id,
+        )
+        return completed
 
     def interrupt(self, session_id: int, reason: str = "ended by user") -> dict | None:
         """End session early."""
+        interrupted, _ = self.terminalize_and_promote(
+            session_id,
+            "interrupt",
+            reason=reason,
+        )
+        return interrupted
+
+    def terminalize_and_promote(
+        self,
+        session_id: int,
+        action: str,
+        *,
+        output_message_id: int | None = None,
+        reason: str = "ended by user",
+    ) -> tuple[dict | None, dict | None]:
+        """Persist a terminal transition and FIFO lease handoff in one write."""
+        if action not in ("complete", "interrupt"):
+            raise ValueError(f"unsupported terminal action: {action}")
         with self._lock:
             session = self._find(session_id)
             if not session or session["state"] in ("complete", "interrupted"):
-                return None
-            session["state"] = "interrupted"
-            session["interrupt_reason"] = reason
+                return None, None
+            session["state"] = "complete" if action == "complete" else "interrupted"
             session["updated_at"] = time.time()
+            if action == "complete" and output_message_id is not None:
+                session["output_message_id"] = output_message_id
+            if action == "interrupt":
+                session["interrupt_reason"] = reason
             lease_key = session.get("lease_key")
+            promoted = None
             if lease_key:
                 lease = self._leases.get(lease_key)
-                if lease and session_id in lease.get("queue", []):
-                    lease["queue"].remove(session_id)
+                if lease:
+                    if lease.get("owner") == session_id:
+                        promoted = self._promote_next_waiter(lease)
+                    elif session_id in lease.get("queue", []):
+                        lease["queue"].remove(session_id)
             self._save()
-            result = dict(session)
-        self._fire("interrupt", result)
-        return result
+            terminal = dict(session)
+
+        # Callbacks may re-enter the store, so fire only after unlocking.
+        self._fire(action, terminal)
+        if promoted:
+            self._fire("update", promoted)
+        return terminal, promoted
 
     def get_lease_owner(self, lease_key: str) -> int | None:
         """Return the current owner ID for a persisted lease."""
@@ -337,25 +383,49 @@ class SessionStore:
             if not lease or lease.get("owner") != session_id:
                 return None
 
-            lease["owner"] = None
-            promoted = None
-            queue = lease.setdefault("queue", [])
-            while queue:
-                next_id = queue.pop(0)
-                candidate = self._find(next_id)
-                if candidate and candidate.get("state") == "waiting_for_cast":
-                    candidate["state"] = "active"
-                    candidate.pop("waiting_on", None)
-                    candidate["updated_at"] = time.time()
-                    lease["owner"] = candidate["id"]
-                    promoted = dict(candidate)
-                    break
+            promoted = self._promote_next_waiter(lease)
             self._save()
 
         # Callbacks may re-enter the store, so fire only after unlocking.
         if promoted:
             self._fire("update", promoted)
         return promoted
+
+    def recover_leases(self) -> list[dict]:
+        """Promote waiters stranded by a legacy partial terminal handoff."""
+        with self._lock:
+            promoted = []
+            changed = False
+            for lease in self._leases.values():
+                owner_id = lease.get("owner")
+                owner = self._find(owner_id) if owner_id is not None else None
+                if owner and owner.get("state") not in ("complete", "interrupted"):
+                    continue
+                changed = True
+                next_session = self._promote_next_waiter(lease)
+                if next_session:
+                    promoted.append(next_session)
+            if changed:
+                self._save()
+
+        for session in promoted:
+            self._fire("update", session)
+        return promoted
+
+    def _promote_next_waiter(self, lease: dict) -> dict | None:
+        """Release a lease and return its next valid FIFO waiter (lock held)."""
+        lease["owner"] = None
+        queue = lease.setdefault("queue", [])
+        while queue:
+            next_id = queue.pop(0)
+            candidate = self._find(next_id)
+            if candidate and candidate.get("state") == "waiting_for_cast":
+                candidate["state"] = "active"
+                candidate.pop("waiting_on", None)
+                candidate["updated_at"] = time.time()
+                lease["owner"] = candidate["id"]
+                return dict(candidate)
+        return None
 
     def _find(self, session_id: int) -> dict | None:
         """Find session by ID (caller must hold lock)."""

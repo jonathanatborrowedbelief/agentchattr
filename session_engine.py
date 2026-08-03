@@ -89,13 +89,17 @@ class SessionEngine:
 
     def end_session(self, session_id: int, reason: str = "ended by user") -> dict | None:
         """End a session early."""
-        session = self._store.interrupt(session_id, reason)
+        session, promoted = self._terminalize_and_promote(
+            session_id,
+            "interrupt",
+            reason=reason,
+        )
         if session:
             expected_agent = self._get_expected_agent(session)
             if expected_agent and self._activity:
                 self._activity.mark_blocked(expected_agent, "session_paused")
             log.info("Session %d interrupted: %s", session_id, reason)
-            self._trigger_promoted(self._store.release_and_promote(session_id))
+            self._trigger_promoted(promoted)
         return session
 
     def get_active(self, channel: str) -> dict | None:
@@ -128,6 +132,9 @@ class SessionEngine:
         their trigger sent before the restart — re-triggering would
         double-queue the same participant.
         """
+        recover_leases = getattr(self._store, "recover_leases", None)
+        for session in recover_leases() if recover_leases else []:
+            self._trigger_promoted(session)
         for session in self._store.list_all():
             if session.get("state") == "active":
                 log.info("Resuming session %d (%s) from phase %d, turn %d",
@@ -214,8 +221,12 @@ class SessionEngine:
         turn_idx = session["current_turn"]
 
         if phase_idx >= len(phases):
-            self._store.complete(session["id"], message_id)
-            self._trigger_promoted(self._store.release_and_promote(session["id"]))
+            _, promoted = self._terminalize_and_promote(
+                session["id"],
+                "complete",
+                output_message_id=message_id,
+            )
+            self._trigger_promoted(promoted)
             return
 
         phase = phases[phase_idx]
@@ -247,16 +258,16 @@ class SessionEngine:
             else:
                 # Session complete - check if this was the output phase
                 is_output = phase.get("is_output", False)
-                self._store.complete(session["id"],
-                                     message_id if is_output else None)
-                self._trigger_promoted(self._store.release_and_promote(session["id"]))
+                _, promoted = self._terminalize_and_promote(
+                    session["id"],
+                    "complete",
+                    output_message_id=message_id if is_output else None,
+                )
+                self._trigger_promoted(promoted)
                 log.info("Session %d complete", session["id"])
 
     def _trigger_current(self, session: dict):
         """Trigger the agent whose turn it is."""
-        lease_key = session.get("lease_key")
-        if lease_key and self._store.get_lease_owner(lease_key) != session.get("id"):
-            return
         tmpl = self._store.get_template(session["template_id"])
         if not tmpl:
             return
@@ -287,31 +298,56 @@ class SessionEngine:
 
         if not self._is_agent(agent):
             # Human's turn - just mark as waiting, don't trigger
-            self._store.set_waiting(session["id"], agent)
+            self._claim_waiting(session, agent)
             return
 
-        # Mark waiting
-        self._store.set_waiting(session["id"], agent)
+        # Claim the lease and mark waiting in the same locked transition.
+        # A concurrent terminal handoff causes this claim to fail rather than
+        # resurrecting the former owner.
+        claimed = self._claim_waiting(session, agent)
+        if not claimed:
+            return
 
         # Assemble the prompt
-        prompt = self._assemble_prompt(session, tmpl, phase, role)
+        prompt = self._assemble_prompt(claimed, tmpl, phase, role)
 
         # Trigger the agent
-        channel = session.get("channel", "general")
+        channel = claimed.get("channel", "general")
         log.info("Session %d: triggering %s (%s) for phase '%s'",
-                 session["id"], agent, role, phase["name"])
+                 claimed["id"], agent, role, phase["name"])
 
         try:
             self._trigger.trigger_sync(agent, channel=channel, prompt=prompt)
         except Exception as exc:
             log.error("Session %d: failed to trigger %s: %s",
-                      session["id"], agent, exc)
+                      claimed["id"], agent, exc)
 
     def _interrupt_and_promote(self, session_id: int, reason: str):
-        interrupted = self._store.interrupt(session_id, reason)
+        interrupted, promoted = self._terminalize_and_promote(
+            session_id,
+            "interrupt",
+            reason=reason,
+        )
         if interrupted:
-            self._trigger_promoted(self._store.release_and_promote(session_id))
+            self._trigger_promoted(promoted)
         return interrupted
+
+    def _terminalize_and_promote(self, session_id: int, action: str, **kwargs):
+        """Use the atomic store API, retaining compatibility with test doubles."""
+        terminalize = getattr(self._store, "terminalize_and_promote", None)
+        if terminalize:
+            return terminalize(session_id, action, **kwargs)
+        if action == "complete":
+            return self._store.complete(session_id, kwargs.get("output_message_id")), None
+        return self._store.interrupt(session_id, kwargs.get("reason", "ended by user")), None
+
+    def _claim_waiting(self, session: dict, agent: str) -> dict | None:
+        """Claim a trigger atomically, with compatibility for legacy doubles."""
+        claim = getattr(self._store, "claim_waiting", None)
+        if claim:
+            return claim(session["id"], agent)
+        self._store.set_waiting(session["id"], agent)
+        return dict(session)
 
     def _trigger_promoted(self, session: dict | None):
         """Deliver the first turn only after a queued session owns the cast."""

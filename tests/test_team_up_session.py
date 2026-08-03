@@ -1,6 +1,7 @@
 import json
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -375,28 +376,102 @@ class SharedCastLeaseTests(unittest.TestCase):
             self.assertEqual(restarted.get_lease_owner("team-up-shared-cast"), owner["id"])
             self.assertEqual(restarted.get(queued["id"])["state"], "waiting_for_cast")
 
-    def test_release_promotes_one_fifo_waiter_only_once(self):
+    def test_engine_completion_terminalizes_and_promotes_in_one_persisted_handoff(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            store = self._store(root)
+            messages = _RecordingMessageStore()
+            trigger = _RecordingTrigger()
+            engine = SessionEngine(store, messages, trigger, registry=_AgentRegistry({"claude-lead"}))
+            first = engine.start_session("video-lab", "video", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
+            second = engine.start_session("publish-queue", "publish", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
+            saved = []
+            original_save = store._save
+
+            def record_save():
+                original_save()
+                saved.append(json.loads((root / "session_runs.json").read_text("utf-8")))
+
+            store._save = record_save
+            engine._advance_current(first, 101)
+
+            handoff = saved[0]
+            self.assertEqual(handoff["leases"]["team-up-shared-cast"]["owner"], second["id"])
+            self.assertEqual(handoff["sessions"][0]["state"], "complete")
+            self.assertEqual(store.get(second["id"])["state"], "waiting")
+            self.assertEqual([call[0] for call in trigger.calls], ["claude-lead", "claude-lead"])
+
+    def test_engine_interruption_promotes_fifo_once_and_duplicate_end_does_not(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            store = self._store(root)
+            messages = _RecordingMessageStore()
+            trigger = _RecordingTrigger()
+            engine = SessionEngine(store, messages, trigger, registry=_AgentRegistry({"claude-lead"}))
+            first = engine.start_session("video-lab", "video", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
+            second = engine.start_session("publish-queue", "publish", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
+            third = engine.start_session("video-lab", "review", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
+
+            ended = engine.end_session(first["id"])
+            duplicate = engine.end_session(first["id"])
+
+            self.assertEqual(ended["state"], "interrupted")
+            self.assertIsNone(duplicate)
+            self.assertEqual(store.get_lease_owner("team-up-shared-cast"), second["id"])
+            self.assertEqual(store.get(second["id"])["state"], "waiting")
+            self.assertEqual(store.get(third["id"])["state"], "waiting_for_cast")
+            self.assertEqual([call[0] for call in trigger.calls], ["claude-lead", "claude-lead"])
+
+    def test_restart_recovers_legacy_terminal_owner_and_prompts_fifo_waiter(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
             store = self._store(root)
             first = store.create("video-lab", "video", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
             second = store.create("publish-queue", "publish", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
-            third = store.create("video-lab", "review", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
+            path = root / "session_runs.json"
+            raw = json.loads(path.read_text("utf-8"))
+            raw["sessions"][0]["state"] = "complete"
+            path.write_text(json.dumps(raw), encoding="utf-8")
 
-            store.complete(first["id"])
-            promoted = store.release_and_promote(first["id"])
-            duplicate = store.release_and_promote(first["id"])
+            restarted = SessionStore(str(path), templates_dir=str(root / "templates"))
+            trigger = _RecordingTrigger()
+            engine = SessionEngine(restarted, _RecordingMessageStore(), trigger, registry=_AgentRegistry({"claude-lead"}))
+            engine.resume_active_sessions()
 
-            self.assertEqual(promoted["id"], second["id"])
-            self.assertEqual(promoted["state"], "active")
-            self.assertIsNone(duplicate)
-            self.assertEqual(store.get_lease_owner("team-up-shared-cast"), second["id"])
-            self.assertEqual(store.get(third["id"])["state"], "waiting_for_cast")
+            self.assertEqual(restarted.get_lease_owner("team-up-shared-cast"), second["id"])
+            self.assertEqual(restarted.get(second["id"])["state"], "waiting")
+            self.assertEqual([call[0] for call in trigger.calls], ["claude-lead"])
 
-            store.interrupt(second["id"])
-            promoted_after_interrupt = store.release_and_promote(second["id"])
-            self.assertEqual(promoted_after_interrupt["id"], third["id"])
-            self.assertEqual(store.get_lease_owner("team-up-shared-cast"), third["id"])
+    def test_trigger_claim_cannot_resurrect_owner_ended_during_interleaving(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            store = self._store(root)
+            owner = store.create("video-lab", "video", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
+            queued = store.create("publish-queue", "publish", {"lead": "claude-lead"}, "user", lease_key="team-up-shared-cast")
+            trigger = _RecordingTrigger()
+            engine = SessionEngine(store, _RecordingMessageStore(), trigger, registry=_AgentRegistry({"claude-lead"}))
+            claim_entered = threading.Event()
+            allow_old_claim = threading.Event()
+            original_claim = store.claim_waiting
+
+            def pause_old_claim(session_id, agent):
+                if session_id == owner["id"]:
+                    claim_entered.set()
+                    allow_old_claim.wait(timeout=1)
+                return original_claim(session_id, agent)
+
+            store.claim_waiting = pause_old_claim
+            runner = threading.Thread(target=engine._trigger_current, args=(owner,))
+            runner.start()
+            self.assertTrue(claim_entered.wait(timeout=1))
+            engine.end_session(owner["id"])
+            allow_old_claim.set()
+            runner.join(timeout=1)
+
+            self.assertFalse(runner.is_alive())
+            self.assertEqual(store.get(owner["id"])["state"], "interrupted")
+            self.assertEqual(store.get(queued["id"])["state"], "waiting")
+            self.assertEqual([call[0] for call in trigger.calls], ["claude-lead"])
 
     def test_only_owner_triggers_and_restart_does_not_retrigger_waiter(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -413,8 +488,7 @@ class SharedCastLeaseTests(unittest.TestCase):
             self.assertEqual(queued["state"], "waiting_for_cast")
             self.assertEqual([call[0] for call in trigger.calls], ["claude-lead"])
 
-            store.complete(owner["id"])
-            promoted = store.release_and_promote(owner["id"])
+            _, promoted = store.terminalize_and_promote(owner["id"], "complete")
             engine._trigger_current(promoted)
             self.assertEqual([call[0] for call in trigger.calls], ["claude-lead", "claude-lead"])
 
