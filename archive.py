@@ -344,6 +344,7 @@ def _do_import(zip_bytes, store, jobs_store, rules_store,
         # Only touch imported messages (by uid), not pre-existing local ones
         if _job_id_remap and imported_uid_to_local_id:
             imported_local_ids = set(imported_uid_to_local_id.values())
+            breadcrumbs_remapped = False
             with store._lock:
                 for m in store._messages:
                     if (m.get("type") == "job_created"
@@ -352,7 +353,9 @@ def _do_import(zip_bytes, store, jobs_store, rules_store,
                         old_jid = m["metadata"].get("job_id")
                         if old_jid in _job_id_remap:
                             m["metadata"]["job_id"] = _job_id_remap[old_jid]
-                store._save()
+                            breadcrumbs_remapped = True
+            if breadcrumbs_remapped:
+                store.flush_bulk()
     report["sections"]["jobs"] = job_report
 
     # --- Import rules ---

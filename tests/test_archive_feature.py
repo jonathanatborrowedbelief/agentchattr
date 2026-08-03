@@ -219,6 +219,53 @@ class ArchiveRoundTripTests(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertIn("unsupported archive schema_version", report["error"])
 
+    def test_import_remaps_job_breadcrumb_and_persists_it(self):
+        source_job = self.source_jobs.create(
+            title="Imported job",
+            job_type="job",
+            channel="general",
+            created_by="ben",
+            uid="source-job",
+        )
+        self.source_store.add(
+            "ben",
+            "Created job",
+            msg_type="job_created",
+            channel="general",
+            metadata={"job_id": source_job["id"]},
+            uid="source-job-breadcrumb",
+        )
+        self.target_jobs.create(
+            title="Existing local job",
+            job_type="job",
+            channel="general",
+            created_by="ben",
+            uid="local-job",
+        )
+        blob = archive.build_export(
+            self.source_store,
+            self.source_jobs,
+            self.source_rules,
+            self.source_summaries,
+            app_version="test",
+        )
+
+        report = archive.import_archive(
+            blob,
+            self.target_store,
+            self.target_jobs,
+            self.target_rules,
+            self.target_summaries,
+            ["general"],
+            max_channels=8,
+        )
+
+        self.assertTrue(report["ok"])
+        imported_job = next(job for job in self.target_jobs.list_all() if job["uid"] == "source-job")
+        reloaded_store = MessageStore(str(self.root / "target" / "messages.jsonl"))
+        breadcrumb = next(msg for msg in reloaded_store.get_recent(10) if msg["uid"] == "source-job-breadcrumb")
+        self.assertEqual(breadcrumb["metadata"]["job_id"], imported_job["id"])
+
     def test_private_startup_canary_messages_are_purged_and_never_exported(self):
         from startup_canary import StartupCanary
 
