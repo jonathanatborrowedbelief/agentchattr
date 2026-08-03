@@ -122,11 +122,11 @@ class _ProviderDeliveryGate:
         self._last_report = None
 
     def report(self, state, reason_code):
-        if state == "provider_ready":
-            self._ready.set()
-        else:
-            self._ready.clear()
         with self._lock:
+            if state == "provider_ready":
+                self._ready.set()
+            else:
+                self._ready.clear()
             report = (state, reason_code)
             if report == self._last_report:
                 return
@@ -134,9 +134,10 @@ class _ProviderDeliveryGate:
         self._report_provider_state(state, reason_code)
 
     def inject(self, prompt):
-        if not self._ready.is_set():
-            return False
-        return self._inject_fn(prompt)
+        with self._lock:
+            if not self._ready.is_set():
+                return False
+            return self._inject_fn(prompt)
 
 
 def _monitor_provider_readiness(

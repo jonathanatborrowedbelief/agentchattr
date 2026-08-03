@@ -72,3 +72,32 @@ $ python3 -m pytest tests/test_team_up_runtime.py tests/test_agent_activity.py -
 ### Concerns
 
 None. `.pids/` remains unmodified and unstaged.
+
+## Fix round 2
+
+### Status
+
+Complete. Provider readiness transitions and queue delivery now share one gate
+lock, so an `offline` report cannot clear readiness between the readiness check
+and an in-flight injection.
+
+### Regression coverage
+
+An event-controlled interleaving test holds the underlying injector open,
+asserts the gate lock remains held, and verifies an `offline` transition waits
+until delivery completes.
+
+### Validation
+
+```text
+$ python3 -m pytest tests/test_team_up_runtime.py tests/test_agent_activity.py -q
+................................................................. [ 89%]
+........                                                                 [100%]
+73 passed, 7 subtests passed in 13.27s
+```
+
+`git diff --check` passed.
+
+### Concerns
+
+None. `.pids/` remains unmodified and unstaged.

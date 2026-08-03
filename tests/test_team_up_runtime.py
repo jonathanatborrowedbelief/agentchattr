@@ -780,6 +780,42 @@ class TeamUpRuntimeTests(unittest.TestCase):
             ("registered", "unknown_screen"),
         ])
 
+    def test_provider_delivery_gate_serializes_offline_with_inflight_injection(self):
+        from wrapper_unix import _ProviderDeliveryGate
+
+        injection_started = threading.Event()
+        release_injection = threading.Event()
+        offline_reported = threading.Event()
+        reports = []
+
+        def inject(prompt):
+            injection_started.set()
+            release_injection.wait(timeout=1)
+            return True
+
+        gate = _ProviderDeliveryGate(inject, lambda state, reason: reports.append((state, reason)))
+        gate.report("provider_ready", "ready_prompt")
+        delivery = threading.Thread(target=lambda: gate.inject("queued prompt"))
+        delivery.start()
+        self.assertTrue(injection_started.wait(timeout=1))
+
+        self.assertFalse(gate._lock.acquire(blocking=False))
+        offline = threading.Thread(
+            target=lambda: (gate.report("offline", "provider_offline"), offline_reported.set()),
+        )
+        offline.start()
+        self.assertFalse(offline_reported.wait(timeout=0.05))
+
+        release_injection.set()
+        delivery.join(timeout=1)
+        offline.join(timeout=1)
+
+        self.assertTrue(offline_reported.is_set())
+        self.assertEqual(reports, [
+            ("provider_ready", "ready_prompt"),
+            ("offline", "provider_offline"),
+        ])
+
     def test_windows_launch_omits_unix_readiness_arguments(self):
         from wrapper import _provider_readiness_run_kwargs
 
