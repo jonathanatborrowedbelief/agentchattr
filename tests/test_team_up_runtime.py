@@ -698,15 +698,99 @@ class TeamUpRuntimeTests(unittest.TestCase):
                 start_watcher=watcher,
                 inject_fn=mock.sentinel.inject,
                 poll_interval=0,
-                session_exists=lambda _: True,
+                session_exists=mock.Mock(side_effect=[True, True, True, True, False]),
             )
 
         self.assertTrue(ready)
         self.assertEqual(reports, [
             ("manual_action_required", "tool_approval"),
             ("provider_ready", "ready_prompt"),
+            ("offline", "provider_offline"),
         ])
         watcher.assert_called_once_with(mock.sentinel.inject)
+
+    def test_readiness_monitor_reports_offline_after_the_child_session_exits(self):
+        from wrapper_unix import _monitor_provider_readiness
+
+        reports = []
+        with mock.patch(
+            "wrapper_unix._capture_pane_text",
+            return_value="› Describe the task you want to work on",
+        ):
+            ready = _monitor_provider_readiness(
+                "agentchattr-codex-sol",
+                "codex",
+                report_provider_state=lambda state, reason: reports.append((state, reason)),
+                start_watcher=mock.Mock(),
+                inject_fn=mock.sentinel.inject,
+                poll_interval=0,
+                session_exists=mock.Mock(side_effect=[True, True, False]),
+            )
+
+        self.assertTrue(ready)
+        self.assertEqual(reports, [
+            ("provider_ready", "ready_prompt"),
+            ("offline", "provider_offline"),
+        ])
+
+    def test_readiness_monitor_does_not_reopen_delivery_after_exit_race(self):
+        from wrapper_unix import _monitor_provider_readiness
+
+        reports = []
+        watcher = mock.Mock()
+        with mock.patch(
+            "wrapper_unix._capture_pane_text",
+            return_value="› Describe the task you want to work on",
+        ):
+            ready = _monitor_provider_readiness(
+                "agentchattr-codex-sol",
+                "codex",
+                report_provider_state=lambda state, reason: reports.append((state, reason)),
+                start_watcher=watcher,
+                inject_fn=mock.sentinel.inject,
+                poll_interval=0,
+                session_exists=mock.Mock(side_effect=[True, False]),
+            )
+
+        self.assertFalse(ready)
+        self.assertEqual(reports, [("offline", "provider_offline")])
+        watcher.assert_not_called()
+
+    def test_provider_delivery_gate_rejects_queue_injection_after_restart_exit(self):
+        from wrapper_unix import _ProviderDeliveryGate
+
+        injected = []
+        reports = []
+        gate = _ProviderDeliveryGate(
+            lambda prompt: injected.append(prompt) or True,
+            lambda state, reason: reports.append((state, reason)),
+        )
+
+        gate.report("provider_ready", "ready_prompt")
+        self.assertTrue(gate.inject("first prompt"))
+        gate.report("offline", "provider_offline")
+        self.assertFalse(gate.inject("must remain queued"))
+        gate.report("registered", "unknown_screen")
+        self.assertFalse(gate.inject("restart still blocked"))
+
+        self.assertEqual(injected, ["first prompt"])
+        self.assertEqual(reports, [
+            ("provider_ready", "ready_prompt"),
+            ("offline", "provider_offline"),
+            ("registered", "unknown_screen"),
+        ])
+
+    def test_windows_launch_omits_unix_readiness_arguments(self):
+        from wrapper import _provider_readiness_run_kwargs
+
+        self.assertEqual(
+            _provider_readiness_run_kwargs("win32", "codex", mock.sentinel.report),
+            {},
+        )
+        self.assertEqual(
+            _provider_readiness_run_kwargs("darwin", "codex", mock.sentinel.report),
+            {"provider": "codex", "report_provider_state": mock.sentinel.report},
+        )
 
     def test_unix_injection_checks_both_tmux_send_steps(self):
         from wrapper_unix import inject

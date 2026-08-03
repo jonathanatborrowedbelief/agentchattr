@@ -111,6 +111,34 @@ def _capture_pane_text(session_name: str) -> str | None:
         return None
 
 
+class _ProviderDeliveryGate:
+    """Keep a long-lived queue watcher closed unless its child is ready."""
+
+    def __init__(self, inject_fn, report_provider_state):
+        self._inject_fn = inject_fn
+        self._report_provider_state = report_provider_state
+        self._ready = threading.Event()
+        self._lock = threading.Lock()
+        self._last_report = None
+
+    def report(self, state, reason_code):
+        if state == "provider_ready":
+            self._ready.set()
+        else:
+            self._ready.clear()
+        with self._lock:
+            report = (state, reason_code)
+            if report == self._last_report:
+                return
+            self._last_report = report
+        self._report_provider_state(state, reason_code)
+
+    def inject(self, prompt):
+        if not self._ready.is_set():
+            return False
+        return self._inject_fn(prompt)
+
+
 def _monitor_provider_readiness(
     session_name,
     provider,
@@ -123,8 +151,12 @@ def _monitor_provider_readiness(
 ):
     """Poll one child pane and start queued delivery only after a ready prompt."""
     last_report = None
+    watcher_started = False
+    was_ready = False
     while session_exists(session_name):
         pane_text = _capture_pane_text(session_name)
+        if not session_exists(session_name):
+            break
         if pane_text is None:
             report = ("offline", "provider_offline")
         else:
@@ -132,11 +164,14 @@ def _monitor_provider_readiness(
         if report != last_report:
             report_provider_state(*report)
             last_report = report
-        if report[0] == "provider_ready":
+        if report[0] == "provider_ready" and not watcher_started:
             start_watcher(inject_fn)
-            return True
+            watcher_started = True
+        was_ready = was_ready or report[0] == "provider_ready"
         time.sleep(poll_interval)
-    return False
+    if last_report != ("offline", "provider_offline"):
+        report_provider_state("offline", "provider_offline")
+    return was_ready
 
 
 def run_agent(
@@ -178,18 +213,25 @@ def run_agent(
     from pathlib import Path
     abs_cwd = str(Path(cwd).resolve())
 
-    # Wire up injection with the tmux session name. The watcher starts only
-    # after the first tmux session exists, so startup cannot drop a prompt.
+    # The queue watcher is long-lived across child restarts. Its injector is
+    # therefore gated per child session, not merely at first startup.
     inject_fn = lambda text: inject(text, tmux_session=session_name, delay=inject_delay)
+    delivery_gate = (
+        _ProviderDeliveryGate(inject_fn, report_provider_state)
+        if report_provider_state is not None and provider
+        else None
+    )
+    delivery_inject_fn = delivery_gate.inject if delivery_gate else inject_fn
     watcher_started = False
     watcher_lock = threading.Lock()
+    child_session_active = None
 
     def start_watcher_once():
         nonlocal watcher_started
         with watcher_lock:
             if watcher_started:
                 return
-            start_watcher(inject_fn)
+            start_watcher(delivery_inject_fn)
             watcher_started = True
 
     print(f"  Using tmux session: {session_name}")
@@ -210,19 +252,28 @@ def run_agent(
             )
             result = subprocess.run(tmux_command, env=env)
             if result.returncode != 0:
+                if delivery_gate:
+                    delivery_gate.report("offline", "provider_offline")
                 print(f"  Error: failed to create tmux session (exit {result.returncode})")
                 break
             if report_provider_state is None:
                 start_watcher_once()
             elif provider:
+                child_session_active = threading.Event()
+                child_session_active.set()
+                active_session = child_session_active
                 threading.Thread(
                     target=_monitor_provider_readiness,
                     args=(session_name, provider),
                     kwargs={
-                        "report_provider_state": report_provider_state,
+                        "report_provider_state": delivery_gate.report,
                         "start_watcher": lambda _: start_watcher_once(),
                         "inject_fn": inject_fn,
                         "poll_interval": readiness_poll_interval,
+                        "session_exists": lambda _, active_session=active_session: (
+                            active_session.is_set()
+                            and _session_exists(session_name)
+                        ),
                     },
                     daemon=True,
                 ).start()
@@ -240,6 +291,10 @@ def run_agent(
                     time.sleep(1)
 
             # Session gone — agent exited
+            if child_session_active is not None:
+                child_session_active.clear()
+            if delivery_gate:
+                delivery_gate.report("offline", "provider_offline")
             if no_restart:
                 break
 
@@ -247,6 +302,10 @@ def run_agent(
             print(f"  Restarting in 3s... (Ctrl+C to quit)")
             time.sleep(3)
         except KeyboardInterrupt:
+            if child_session_active is not None:
+                child_session_active.clear()
+            if delivery_gate:
+                delivery_gate.report("offline", "provider_offline")
             # Kill the tmux session on Ctrl+C
             subprocess.run(
                 ["tmux", "kill-session", "-t", session_name],

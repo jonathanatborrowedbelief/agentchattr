@@ -643,6 +643,16 @@ def _report_provider_state(
         return False
 
 
+def _provider_readiness_run_kwargs(platform: str, provider: str, report_provider_state):
+    """Pass Unix-only readiness wiring without changing the Windows contract."""
+    if platform == "win32":
+        return {}
+    return {
+        "provider": provider,
+        "report_provider_state": report_provider_state,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Queue watcher
 # ---------------------------------------------------------------------------
@@ -1284,8 +1294,13 @@ def _run_main(cleanup: _RegistrationCleanup):
         pid_holder=_agent_pid,
         inject_env=inject_env,
         inject_delay=agent_cfg.get("inject_delay", 0.3),
-        provider=provider,
-        report_provider_state=report_provider_state,
+    )
+    run_kwargs.update(
+        _provider_readiness_run_kwargs(
+            sys.platform,
+            provider,
+            report_provider_state,
+        )
     )
     if sys.platform != "win32":
         run_kwargs["session_name"] = unix_session_name
