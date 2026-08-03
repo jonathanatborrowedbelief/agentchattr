@@ -4,8 +4,8 @@
 
 Permanent Team Up v2 and the social-workflow templates are implemented and
 reviewed on `codex/team-up-v2`. The automated Task 6 reliability gates pass,
-but the required live production-path smoke is blocked on three Codex canary
-response timeouts.
+but the required live production-path smoke remains blocked after the one
+authorized final wrapper restart.
 The web UI is `http://127.0.0.1:8300`; MCP HTTP is
 `http://127.0.0.1:8200`.
 
@@ -96,6 +96,17 @@ or persisted by the launcher.
   composer prompts with no detected MCP transport, unknown-tool, or approval
   error. Their queue files had no pending records, so the canary deliveries were
   claimed but produced no authenticated `chat_send` response before timeout.
+- Commit `110c7a3` sets `inject_delay = 1.0` only for `codex-luna`,
+  `codex-terra`, and `codex-sol`, preventing Enter from racing multiline paste
+  ingestion. The permanent local `Always allow` permission for
+  `agentchattr.chat_send` was applied before the final restart.
+- The single authorized final restart retained exactly the five stable
+  identities with no `-2`. Claude and all three Codex wrappers reported
+  `provider_ready/ready_prompt`; Gemini reported `registered/unknown_screen`.
+  The new canary passed only `claude-lead`; `gemini-video` and all three Codex
+  identities blocked on `response_timeout`. Their queues had no pending records,
+  and the Codex panes returned to ready composers without a visible MCP or
+  approval error.
 - Because the production-path readiness gate stayed closed, no `video-lab` or
   `publish-queue` fixture session was started and no media or publishing action
   ran. The shared-cast live wait/promotion and live private-canary surface audit
@@ -112,9 +123,9 @@ or persisted by the launcher.
 ## Verification
 
 - Task 6 focused runtime/session/activity/archive/social-template suite:
-  `125 passed, 16 subtests passed`.
+  `126 passed, 16 subtests passed`.
 - Node activity-status suite: 8/8 passed.
-- Full Python discovery: `125 passed, 16 subtests passed`.
+- Full Python discovery: `126 passed, 16 subtests passed`.
 - Archive regression suite: 8/8 passed. Commit `60fc4db` replaces the removed
   `MessageStore._save()` call with a supported bulk flush after releasing the
   non-reentrant store lock, and adds a reload-based breadcrumb persistence test.
@@ -134,11 +145,11 @@ or persisted by the launcher.
 
 ## Remaining external constraints
 
-- Live Task 6 blocker: the provider gate is green for all five identities and
-  the real canary is green for Claude/Gemini, but all three Codex identities
-  timed out after claiming their queue deliveries without an authenticated
-  response. Diagnose that Codex queue-injection-to-tool-call gap without
-  weakening or bypassing the Agent Chatter canary.
+- Live Task 6 blocker after the final authorized restart: Gemini no longer
+  classified its current pane as ready, and Gemini plus all three Codex
+  identities timed out after their canary queue deliveries were claimed. No
+  further restart loop is authorized; diagnose the current Gemini screen and
+  Codex submission/tool-response path without weakening the canary.
 - The preferred `gemini-2.5-pro` credential quota is currently exhausted.
 - Gemini CLI 0.52 no longer offers `gemini-2.5-flash` as an interactive manual
   model and routed that override to quota-blocked `gemini-3.5-flash`.
@@ -148,8 +159,9 @@ or persisted by the launcher.
 
 ## Next
 
-Resolve the Codex canary response-timeout path, then require all five exact
-identities to remain `provider_ready` and pass the real private nonce canary.
+Diagnose the post-restart Gemini `unknown_screen` and the remaining Codex
+canary response-timeout path, then require all five exact identities to remain
+`provider_ready` and pass the real private nonce canary.
 Then run harmless `video-lab` and `publish-queue` fixtures to prove the second
 waits for `team-up-shared-cast` and promotes after the first ends, and verify the
 private channel/nonces are absent from UI, history, archive, summaries, and MCP
