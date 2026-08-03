@@ -88,6 +88,7 @@ room_settings: dict = {
 # Channel validation
 _CHANNEL_NAME_RE = _re.compile(r'^[a-z0-9][a-z0-9\-]{0,19}$')
 MAX_CHANNELS = 8
+PROTECTED_OPERATIONAL_CHANNELS = ("video-lab", "publish-queue")
 
 # Agent hats (persisted to data/hats.json)
 agent_hats: dict[str, str] = {}  # { agent_name: svg_string }
@@ -161,16 +162,23 @@ def _load_settings():
             room_settings.update(saved)
         except Exception:
             pass
+    seen = set()
+    user_channels = []
+    for channel in room_settings.get("channels", []):
+        if not isinstance(channel, str) or channel in seen:
+            continue
+        seen.add(channel)
+        if channel in ("general", StartupCanary.PRIVATE_CHANNEL, *PROTECTED_OPERATIONAL_CHANNELS):
+            continue
+        user_channels.append(channel)
+
+    user_limit = MAX_CHANNELS - 1 - len(PROTECTED_OPERATIONAL_CHANNELS)
     room_settings["channels"] = [
-        channel
-        for channel in room_settings.get("channels", [])
-        if channel != StartupCanary.PRIVATE_CHANNEL
+        "general",
+        *user_channels[:user_limit],
+        *PROTECTED_OPERATIONAL_CHANNELS,
     ]
-    # Ensure "general" always exists and is first
-    if "channels" not in room_settings or not room_settings["channels"]:
-        room_settings["channels"] = ["general"]
-    elif "general" not in room_settings["channels"]:
-        room_settings["channels"].insert(0, "general")
+    _save_settings()
 
 
 def _save_settings():
@@ -1439,7 +1447,7 @@ async def websocket_endpoint(websocket: WebSocket):
             elif event.get("type") == "channel_rename":
                 old_name = (event.get("old_name") or "").strip().lower()
                 new_name = (event.get("new_name") or "").strip().lower()
-                if old_name == "general":
+                if old_name == "general" or old_name in PROTECTED_OPERATIONAL_CHANNELS:
                     continue
                 if not new_name or not _CHANNEL_NAME_RE.match(new_name):
                     continue
@@ -1468,7 +1476,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif event.get("type") == "channel_delete":
                 name = (event.get("name") or "").strip().lower()
-                if name == "general":
+                if name == "general" or name in PROTECTED_OPERATIONAL_CHANNELS:
                     continue
                 if name not in room_settings["channels"]:
                     continue
@@ -2572,9 +2580,7 @@ async def start_session(request: Request):
     body = await request.json()
     template_id = body.get("template_id", "")
     draft_message_id = body.get("draft_message_id")
-    channel = body.get("channel", "general")
-    if channel == StartupCanary.PRIVATE_CHANNEL:
-        return JSONResponse({"error": "private channel is reserved"}, status_code=400)
+    requested_channel = body.get("channel")
     cast = body.get("cast", {})
     goal = body.get("goal", "")
     started_by = body.get("started_by", "user")
@@ -2603,6 +2609,10 @@ async def start_session(request: Request):
     if not tmpl:
         return JSONResponse({"error": f"unknown template: {template_id}"}, status_code=400)
 
+    channel = requested_channel or tmpl.get("default_channel", "general")
+    if channel == StartupCanary.PRIVATE_CHANNEL:
+        return JSONResponse({"error": "private channel is reserved"}, status_code=400)
+
     # Auto-fill cast from available agents if not fully provided
     if not cast:
         online = registry.get_active_names() if registry else []
@@ -2618,6 +2628,10 @@ async def start_session(request: Request):
                 {"error": "not enough agents online to fill all roles"},
                 status_code=400,
             )
+        for role in tmpl.get("human_roles", []):
+            human = tmpl.get("default_cast", {}).get(role)
+            if human:
+                cast[role] = human
 
     session = session_engine.start_session(
         template_id,
@@ -2625,7 +2639,7 @@ async def start_session(request: Request):
         cast,
         started_by,
         goal,
-        lease_key="team-up-shared-cast",
+        lease_key=tmpl.get("lease_key", "team-up-shared-cast"),
     )
     if not session:
         return JSONResponse({"error": "could not start session (one may already be active)"}, status_code=409)

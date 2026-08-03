@@ -1,0 +1,24 @@
+{
+  "id": "video-lab",
+  "name": "Video Lab",
+  "description": "A seven-phase workflow for studying source footage and producing a verified recreation package.",
+  "default_channel": "video-lab",
+  "lease_key": "team-up-shared-cast",
+  "roles": ["lead", "video", "scout", "builder", "integrator"],
+  "default_cast": {
+    "lead": "claude-lead",
+    "video": "gemini-video",
+    "scout": "codex-luna",
+    "builder": "codex-terra",
+    "integrator": "codex-sol"
+  },
+  "phases": [
+    {"name": "Intake + Goal", "participants": ["lead"], "prompt": "Define the requested video outcome, constraints, source assets, done criteria, and ownership. Stop for unresolved scope conflicts."},
+    {"name": "Visual Teardown", "participants": ["video"], "prompt": "Inspect supplied footage natively. Post an ordered visual timeline, motion behavior, composition, and any evidence limits."},
+    {"name": "Evidence + Decomposition", "participants": ["scout"], "prompt": "Find the real source assets or template when possible. Post paths, timestamps, interaction evidence, and a build-ready decomposition."},
+    {"name": "Recreation Decision", "participants": ["lead"], "prompt": "Choose reuse, live capture, or recreation from the evidence. State the smallest approved implementation slice and acceptance checks."},
+    {"name": "Production Package", "participants": ["builder"], "prompt": "Create only the approved production assets. Post changed files, commands, validation, and any blocker for integration."},
+    {"name": "Integrate + QC", "participants": ["integrator"], "prompt": "Integrate the package, run focused quality checks, and verify timing, visual fidelity, and output format. Report evidence or blockers."},
+    {"name": "Release", "participants": ["lead"], "prompt": "Audit the result against the goal and release criteria. Post final artifact evidence or the concrete reason release is blocked.", "is_output": true}
+  ]
+}

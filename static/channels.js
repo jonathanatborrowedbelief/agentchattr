@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 
 const _channelScrollMsg = {};  // channel name -> message ID at top of viewport
+const _protectedOperationalChannels = new Set(['video-lab', 'publish-queue']);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -87,8 +88,8 @@ function _renderChannelSidebar(container) {
             item.appendChild(badge);
         }
 
-        // Edit + delete for non-general channels
-        if (name !== 'general') {
+        // Operational channels are persistent workflow destinations.
+        if (name !== 'general' && !_protectedOperationalChannels.has(name)) {
             const actions = document.createElement('span');
             actions.className = 'channel-sidebar-actions';
 
@@ -269,6 +270,7 @@ function _submitInlineCreate(input, wrapper) {
 // ---------------------------------------------------------------------------
 
 function showChannelRenameDialog(oldName) {
+    if (_protectedOperationalChannels.has(oldName)) return;
     const list = document.getElementById('channel-sidebar-list');
     if (!list) return;
     list.querySelector('.channel-sidebar-create')?.remove();
@@ -345,7 +347,7 @@ function showChannelRenameDialog(oldName) {
 // ---------------------------------------------------------------------------
 
 function deleteChannel(name) {
-    if (name === 'general') return;
+    if (name === 'general' || _protectedOperationalChannels.has(name)) return;
     // Try sidebar item first, fall back to tab
     const item = document.querySelector(`.channel-sidebar-item[data-channel="${name}"]`)
               || document.querySelector(`.channel-tab[data-channel="${name}"]`);

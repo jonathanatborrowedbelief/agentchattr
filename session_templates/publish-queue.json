@@ -1,0 +1,26 @@
+{
+  "id": "publish-queue",
+  "name": "Publish Queue",
+  "description": "A seven-phase workflow for safely importing, approving, publishing, reconciling, and auditing social content.",
+  "default_channel": "publish-queue",
+  "lease_key": "team-up-shared-cast",
+  "roles": ["lead", "video", "scout", "builder", "integrator", "approver"],
+  "human_roles": ["approver"],
+  "default_cast": {
+    "lead": "claude-lead",
+    "video": "gemini-video",
+    "scout": "codex-luna",
+    "builder": "codex-terra",
+    "integrator": "codex-sol",
+    "approver": "Jonathan"
+  },
+  "phases": [
+    {"name": "Import", "participants": ["lead"], "prompt": "Identify the publish item, destination, source files, account context, and success criteria. Keep the item in draft state until approval."},
+    {"name": "Preflight", "participants": ["scout"], "prompt": "Check metadata, permissions, assets, destination requirements, and duplicate risk. Post evidence and a clear ready or blocked result."},
+    {"name": "Creative QC", "participants": ["video"], "prompt": "Review the media, caption, claims, visual framing, and platform fit. Post only actionable fixes or explicit approval evidence."},
+    {"name": "Human Approval", "participants": ["approver"], "prompt": "Jonathan: approve, reject, or request specific revisions. This is a human gate; no agent may execute the publication without your response."},
+    {"name": "Execute", "participants": ["builder"], "prompt": "Execute only the approved publication action. Post the platform response, canonical identifier, and any failure without retrying outside scope."},
+    {"name": "Reconcile", "participants": ["integrator"], "prompt": "Verify the published or queued state against the destination. Reconcile identifiers, timestamps, and delivery status with evidence."},
+    {"name": "Audit", "participants": ["lead"], "prompt": "Audit all gates and evidence. Post the final publish record, remaining risk, or a concrete blocker; do not claim completion without proof.", "is_output": true}
+  ]
+}

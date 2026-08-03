@@ -468,8 +468,8 @@ def validate_session_template(tmpl: dict) -> list[str]:
     phases = tmpl.get("phases", [])
     if not isinstance(phases, list) or len(phases) == 0:
         errors.append("'phases' must be a non-empty array")
-    elif len(phases) > 6:
-        errors.append(f"Too many phases ({len(phases)}, max 6)")
+    elif len(phases) > 7:
+        errors.append(f"Too many phases ({len(phases)}, max 7)")
 
     roles_set = set(roles) if isinstance(roles, list) else set()
     output_count = 0
