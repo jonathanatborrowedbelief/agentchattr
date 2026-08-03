@@ -1413,30 +1413,85 @@ class TeamUpRuntimeTests(unittest.TestCase):
             {"provider": "codex", "report_provider_state": mock.sentinel.report},
         )
 
-    def test_unix_injection_checks_both_tmux_send_steps(self):
+    def test_unix_injection_uses_private_tmux_buffer_before_enter(self):
         from wrapper_unix import inject
 
+        prompt = "private first line\nROLE: Integrator\nfinal line"
+        buffer_id = SimpleNamespace(hex="fixed-buffer-id")
         with (
             mock.patch(
                 "wrapper_unix.subprocess.run",
                 side_effect=[
                     SimpleNamespace(returncode=0),
                     SimpleNamespace(returncode=0),
+                    SimpleNamespace(returncode=0),
                 ],
             ) as run,
-            mock.patch("wrapper_unix.time.sleep"),
+            mock.patch("uuid.uuid4", return_value=buffer_id),
+            mock.patch("wrapper_unix.time.sleep") as sleep,
         ):
             self.assertTrue(
-                inject("SAFE_PROMPT", tmux_session="agentchattr-codex-sol")
+                inject(prompt, tmux_session="agentchattr-codex-sol", delay=1.0)
             )
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list, [
+            mock.call(
+                [
+                    "tmux", "load-buffer", "-b",
+                    "agentchattr-inject-fixed-buffer-id", "-",
+                ],
+                input=prompt.encode("utf-8"),
+                capture_output=True,
+            ),
+            mock.call(
+                [
+                    "tmux", "paste-buffer", "-p", "-d", "-b",
+                    "agentchattr-inject-fixed-buffer-id", "-t",
+                    "agentchattr-codex-sol",
+                ],
+                capture_output=True,
+            ),
+            mock.call(
+                [
+                    "tmux", "send-keys", "-t",
+                    "agentchattr-codex-sol", "Enter",
+                ],
+                capture_output=True,
+            ),
+        ])
+        sleep.assert_called_once_with(1.0)
+        for call in run.call_args_list:
+            self.assertNotIn(prompt, call.args[0])
 
-        with mock.patch(
-            "wrapper_unix.subprocess.run",
-            return_value=SimpleNamespace(returncode=1),
+    def test_unix_injection_cleans_buffer_and_preserves_failure(self):
+        from wrapper_unix import inject
+
+        prompt = "private multiline\ncanary"
+        with (
+            mock.patch(
+                "wrapper_unix.subprocess.run",
+                side_effect=[
+                    SimpleNamespace(returncode=0),
+                    SimpleNamespace(returncode=1),
+                    SimpleNamespace(returncode=0),
+                ],
+            ) as run,
+            mock.patch(
+                "uuid.uuid4",
+                return_value=SimpleNamespace(hex="failed-buffer-id"),
+            ),
+            mock.patch("wrapper_unix.time.sleep") as sleep,
         ):
             with self.assertRaisesRegex(RuntimeError, "tmux injection failed"):
-                inject("SAFE_PROMPT", tmux_session="agentchattr-codex-sol")
+                inject(prompt, tmux_session="agentchattr-codex-sol")
+
+        self.assertEqual(run.call_args_list[-1], mock.call(
+            ["tmux", "delete-buffer", "-b", "agentchattr-inject-failed-buffer-id"],
+            capture_output=True,
+        ))
+        self.assertEqual(run.call_count, 3)
+        sleep.assert_not_called()
+        for call in run.call_args_list:
+            self.assertNotIn(prompt, call.args[0])
 
     def test_watcher_starts_only_after_tmux_session_exists(self):
         from wrapper_unix import run_agent

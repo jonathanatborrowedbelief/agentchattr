@@ -1,4 +1,4 @@
-"""Mac/Linux agent injection — uses tmux send-keys to type into the agent CLI.
+"""Mac/Linux agent injection through deterministic tmux buffer pastes.
 
 Called by wrapper.py on Mac and Linux. Requires tmux to be installed.
   - Mac:   brew install tmux
@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 
 from provider_readiness import classify_provider_screen
 
@@ -43,23 +44,48 @@ def _check_tmux():
 
 
 def inject(text: str, *, tmux_session: str, delay: float = 0.3):
-    """Send text + Enter to a tmux session via send-keys."""
-    # Use -l to send text literally (avoids misinterpreting as key names),
-    # then send Enter as a separate key press
-    typed = subprocess.run(
-        ["tmux", "send-keys", "-t", tmux_session, "-l", text],
+    """Paste an exact multiline prompt through a private buffer, then submit."""
+    buffer_name = f"agentchattr-inject-{uuid.uuid4().hex}"
+    loaded = subprocess.run(
+        ["tmux", "load-buffer", "-b", buffer_name, "-"],
+        input=text.encode("utf-8"),
         capture_output=True,
     )
-    if typed.returncode != 0:
+    if loaded.returncode != 0:
         raise RuntimeError("tmux injection failed before prompt submission")
-    # Let TUI process the text before sending Enter (matches Windows wrapper)
-    time.sleep(delay)
-    submitted = subprocess.run(
-        ["tmux", "send-keys", "-t", tmux_session, "Enter"],
-        capture_output=True,
-    )
-    if submitted.returncode != 0:
-        raise RuntimeError("tmux injection failed during prompt submission")
+
+    buffer_owned = True
+    try:
+        pasted = subprocess.run(
+            [
+                "tmux", "paste-buffer", "-p", "-d", "-b", buffer_name,
+                "-t", tmux_session,
+            ],
+            capture_output=True,
+        )
+        if pasted.returncode != 0:
+            raise RuntimeError("tmux injection failed before prompt submission")
+        buffer_owned = False  # paste-buffer -d deleted it after a successful paste
+
+        # Let the provider finish ingesting the bracketed paste before Enter.
+        time.sleep(delay)
+        submitted = subprocess.run(
+            ["tmux", "send-keys", "-t", tmux_session, "Enter"],
+            capture_output=True,
+        )
+        if submitted.returncode != 0:
+            raise RuntimeError("tmux injection failed during prompt submission")
+    except Exception as exc:
+        if buffer_owned:
+            cleaned = subprocess.run(
+                ["tmux", "delete-buffer", "-b", buffer_name],
+                capture_output=True,
+            )
+            if cleaned.returncode != 0:
+                raise RuntimeError(
+                    "tmux injection failed and buffer cleanup failed"
+                ) from exc
+        raise
     return True
 
 
