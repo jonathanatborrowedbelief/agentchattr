@@ -40,6 +40,14 @@ _STATE_REASONS = {
     "offline": {"provider_offline"},
 }
 
+_READY_PROMPTS = {
+    "claude": re.compile(r"(?m)^[^\S\r\n]*❯[^\S\r\n]*$"),
+    "gemini": re.compile(
+        r"(?mi)^[^\S\r\n]*>[^\S\r\n]*type your message or @path/to/file[^\r\n]*$"
+    ),
+    "codex": re.compile(r"(?m)^[^\S\r\n]*›(?:[^\S\r\n]+[^\r\n]*)?$"),
+}
+
 
 def is_valid_provider_report(state: str, reason_code: str) -> bool:
     """Return whether a provider report uses a safe, supported state pair."""
@@ -55,7 +63,6 @@ def classify_provider_screen(provider: str, pane_text: str) -> tuple[ProviderSta
 
     ``pane_text`` is deliberately inspected only locally and is never returned.
     """
-    del provider  # Providers share the safety-first interaction markers for now.
     text = pane_text.lower() if isinstance(pane_text, str) else ""
 
     if re.search(r"\b(update available|restart to update|update now)\b", text):
@@ -66,7 +73,8 @@ def classify_provider_screen(provider: str, pane_text: str) -> tuple[ProviderSta
         return "manual_action_required", "mcp_startup_failure"
     if re.search(r"\b(allow|approve)\b.{0,80}\b(tool|command)\b", text):
         return "manual_action_required", "tool_approval"
-    if re.search(r"(^|\n)\s*[›❯]\s*(?:describe|type|ask|$)", text):
+    ready_prompt = _READY_PROMPTS.get(str(provider).lower())
+    if ready_prompt is not None and ready_prompt.search(text):
         return "provider_ready", "ready_prompt"
 
     return "registered", "unknown_screen"

@@ -21,6 +21,7 @@ cwd = "~/Documents/Codex"
 label = "Claude Lead"
 role = "Lead"
 launch_args = ["--model", "opus", "--effort", "high", "--permission-mode", "auto"]
+mcp_merge_project = false
 instructions_file = "Claude.md"
 inject_delay = 1.0
 
@@ -37,7 +38,12 @@ command = "codex"
 cwd = "~/Documents/Codex"
 label = "Codex Sol"
 role = "Integrator"
-launch_args = ["--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=high"]
+launch_args = [
+    "--model", "gpt-5.6-sol",
+    "-c", "model_reasoning_effort=high",
+    "-c", "mcp_servers.magic.enabled=false",
+    "-c", "mcp_servers.apify.enabled=false",
+]
 instructions_file = "Codex.md"
 
 [agents.codex-terra]
@@ -47,7 +53,12 @@ command = "codex"
 cwd = "~/Documents/Codex"
 label = "Codex Terra"
 role = "Builder"
-launch_args = ["--model", "gpt-5.6-terra", "-c", "model_reasoning_effort=high"]
+launch_args = [
+    "--model", "gpt-5.6-terra",
+    "-c", "model_reasoning_effort=high",
+    "-c", "mcp_servers.magic.enabled=false",
+    "-c", "mcp_servers.apify.enabled=false",
+]
 instructions_file = "Codex.md"
 
 [agents.codex-luna]
@@ -57,7 +68,12 @@ command = "codex"
 cwd = "~/Documents/Codex"
 label = "Codex Luna"
 role = "Scout"
-launch_args = ["--model", "gpt-5.6-luna", "-c", "model_reasoning_effort=medium"]
+launch_args = [
+    "--model", "gpt-5.6-luna",
+    "-c", "model_reasoning_effort=medium",
+    "-c", "mcp_servers.magic.enabled=false",
+    "-c", "mcp_servers.apify.enabled=false",
+]
 instructions_file = "Codex.md"
 
 [agents.gemini]

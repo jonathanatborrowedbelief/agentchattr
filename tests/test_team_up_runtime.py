@@ -511,6 +511,33 @@ class ProviderReadinessClassifierTests(unittest.TestCase):
             ("provider_ready", "ready_prompt"),
         )
 
+    def test_classifies_captured_provider_specific_composers(self):
+        from provider_readiness import classify_provider_screen
+
+        cases = {
+            "claude": "Claude Code\n❯\u00a0\n  ? for shortcuts",
+            "gemini": "Gemini\n> Type your message or @path/to/file\nUsing 1 GEMINI.md file",
+            "codex": "Codex\n› <composer placeholder>\n  ? for shortcuts",
+        }
+        for provider, pane_text in cases.items():
+            with self.subTest(provider=provider):
+                self.assertEqual(
+                    classify_provider_screen(provider, pane_text),
+                    ("provider_ready", "ready_prompt"),
+                )
+
+    def test_provider_composers_do_not_cross_classify(self):
+        from provider_readiness import classify_provider_screen
+
+        self.assertEqual(
+            classify_provider_screen("gemini", "❯\u00a0"),
+            ("registered", "unknown_screen"),
+        )
+        self.assertEqual(
+            classify_provider_screen("claude", "> Type your message or @path/to/file"),
+            ("registered", "unknown_screen"),
+        )
+
     def test_classifies_known_manual_action_blockers_without_returning_pane_text(self):
         from provider_readiness import classify_provider_screen
 
@@ -787,6 +814,61 @@ class TeamUpRuntimeTests(unittest.TestCase):
                 "auto",
             ],
         )
+
+    def test_dedicated_codex_launches_disable_unrelated_optional_mcps(self):
+        from config_loader import load_config
+
+        config = load_config(Path(__file__).parents[1])
+        expected_tail = [
+            "-c",
+            "mcp_servers.magic.enabled=false",
+            "-c",
+            "mcp_servers.apify.enabled=false",
+        ]
+
+        for identity in ("codex-luna", "codex-terra", "codex-sol"):
+            with self.subTest(identity=identity):
+                self.assertEqual(
+                    _merge_launch_args(config["agents"][identity], [])[-4:],
+                    expected_tail,
+                )
+        self.assertNotIn(
+            "mcp_servers.magic.enabled=false",
+            _merge_launch_args(config["agents"]["codex"], []),
+        )
+
+    def test_claude_lead_injected_config_excludes_project_mcps(self):
+        from config_loader import load_config
+        from wrapper import _build_provider_launch
+
+        config = load_config(Path(__file__).parents[1])
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project_dir = root / "project"
+            project_dir.mkdir()
+            (project_dir / ".mcp.json").write_text(
+                json.dumps({
+                    "mcpServers": {
+                        "magic": {"command": "optional-project-mcp"},
+                    },
+                }),
+                encoding="utf-8",
+            )
+            _, _, _, settings_path = _build_provider_launch(
+                "claude-lead",
+                config["agents"]["claude-lead"],
+                "claude-lead",
+                root / "data",
+                None,
+                [],
+                {},
+                token="test-token",
+                mcp_cfg=config["mcp"],
+                project_dir=project_dir,
+            )
+            injected = json.loads(settings_path.read_text("utf-8"))
+
+        self.assertEqual(set(injected["mcpServers"]), {"agentchattr"})
 
     def test_provider_alias_reuses_builtin_mcp_defaults(self):
         cfg = {"provider": "codex"}
