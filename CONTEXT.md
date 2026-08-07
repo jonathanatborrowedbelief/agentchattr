@@ -231,6 +231,21 @@ The hash-lock and server-listener pre-deployment gates are closed locally.
 Provider readiness redesign remains a separate, unstarted review item, and the
 live VPS deployment still requires separate approval and host-side validation.
 
+VPS pilot checkpoint (2026-08-07): Jonathan approved the first-write slice.
+Release `0d609fe2c32e1a8592c22f9bfe0dc4f864688c24` is the active
+`/opt/agentchattr/current` target; its archive, manifest, Python hash lock, npm
+lock, and Node archive were verified before installation. Ubuntu-native
+`systemd-analyze verify` passed. The disabled `agentchattr-server.service` was
+started manually and survived a manual restart with exactly three loopback
+listeners, zero automatic restarts, the documented caps, more than 6.8 GiB
+MemAvailable, and Hermes fully green before and after. The aggregate target,
+health timer, and every provider worker remain inactive. The isolated Claude
+home reports `loggedIn: false`; the next gate is Jonathan completing `claude
+auth login` interactively for `/var/lib/agentchattr/home/claude-lead`. Do not
+start the Claude worker or expand providers before that human gate. The npm
+installation reports 17 inherited dependency findings (3 moderate, 13 high, 1
+critical); do not auto-fix or change the locked pilot graph without review.
+
 Run harmless `video-lab` and `publish-queue` fixtures to prove the second
 waits for `team-up-shared-cast` and promotes after the first ends, and verify the
 private channel/nonces are absent from UI, history, archive, summaries, and MCP
