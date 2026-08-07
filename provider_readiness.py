@@ -41,12 +41,19 @@ _STATE_REASONS = {
 }
 
 _READY_PROMPTS = {
-    "claude": re.compile(r"(?m)^[^\S\r\n]*❯[^\S\r\n]*$"),
     "gemini": re.compile(
         r"(?mi)^[^\S\r\n]*>[^\S\r\n]*type your message or @path/to/file[^\r\n]*$"
     ),
     "codex": re.compile(r"(?m)^[^\S\r\n]*›(?:[^\S\r\n]+[^\r\n]*)?$"),
 }
+_CLAUDE_BARE_COMPOSER = re.compile(r"(?m)^[^\S\r\n]*❯[^\S\r\n]*$")
+_CLAUDE_SUGGESTION_COMPOSER = re.compile(
+    r"(?m)^[^\S\r\n]*❯[^\S\r\n]+try [^\r\n]*$"
+)
+_CLAUDE_READY_FOOTER = re.compile(
+    r"(?m)^[^\S\r\n]*⏸[^\S\r\n]+manual mode on[^\S\r\n]+·[^\S\r\n]+\?"
+    r"[^\S\r\n]+for shortcuts[^\S\r\n]+·[^\S\r\n]+←[^\S\r\n]+for agents[^\S\r\n]*$"
+)
 
 
 def is_valid_provider_report(state: str, reason_code: str) -> bool:
@@ -73,8 +80,19 @@ def classify_provider_screen(provider: str, pane_text: str) -> tuple[ProviderSta
         return "manual_action_required", "mcp_startup_failure"
     if re.search(r"\b(allow|approve)\b.{0,80}\b(tool|command)\b", text):
         return "manual_action_required", "tool_approval"
-    ready_prompt = _READY_PROMPTS.get(str(provider).lower())
-    if ready_prompt is not None and ready_prompt.search(text):
+    normalized_provider = str(provider).lower()
+    if normalized_provider == "claude":
+        ready = (
+            _CLAUDE_BARE_COMPOSER.search(text) is not None
+            or (
+                _CLAUDE_SUGGESTION_COMPOSER.search(text) is not None
+                and _CLAUDE_READY_FOOTER.search(text) is not None
+            )
+        )
+    else:
+        ready_prompt = _READY_PROMPTS.get(normalized_provider)
+        ready = ready_prompt is not None and ready_prompt.search(text) is not None
+    if ready:
         return "provider_ready", "ready_prompt"
 
     return "registered", "unknown_screen"
