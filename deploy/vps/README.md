@@ -32,7 +32,7 @@ never place its value in this repository, a unit, a command line, or a journal.
 
 ## Pinned isolated install
 
-The reviewed release carries the exact Python environment in
+The reviewed release carries the exact hash-locked Python environment in
 `requirements.vps.lock`, the Node/npm archive and provider integrity metadata in
 `toolchain.vps.lock.toml`, and a fully resolved npm dependency graph in
 `npm-toolchain/package-lock.json`. Install nothing under `/usr/local/bin`, and
@@ -67,7 +67,8 @@ deliberately `npm ci --omit=dev --ignore-scripts`: it uses the committed
 package lock and never runs package lifecycle scripts during installation.
 
 ```sh
-sudo /opt/agentchattr/current/.venv/bin/pip install \
+sudo /opt/agentchattr/current/.venv/bin/python -m pip install \
+  --require-hashes \
   -r /opt/agentchattr/current/deploy/vps/requirements.vps.lock
 sudo install -d -o root -g root -m 0755 /opt/agentchattr/toolchain/npm
 sudo install -o root -g root -m 0644 \
@@ -80,9 +81,9 @@ sudo chown -R root:root /opt/agentchattr/current /opt/agentchattr/toolchain
 sudo chmod -R go-w /opt/agentchattr/current /opt/agentchattr/toolchain
 ```
 
-Version-only Python pins are an outstanding blocker for `--require-hashes`.
-Do not claim the first VPS write is ready until every Python requirement has
-artifact hashes and the install command is updated to enforce them.
+The Python lock was generated mechanically from the known-working exact pins
+with pip-tools under Python 3.12. Every requirement includes SHA-256 artifact
+hashes, and `--require-hashes` makes pip reject missing or substituted inputs.
 
 Before `npm ci`, compare each provider's registry `dist.integrity` with the
 corresponding value in `toolchain.vps.lock.toml`; the committed
@@ -179,8 +180,14 @@ The server gate is:
 ```sh
 /opt/agentchattr/current/.venv/bin/python \
   /opt/agentchattr/current/deploy/vps/wait_ready.py \
-  --url http://127.0.0.1:8300/healthz --mode server --timeout-seconds 60
+  --url http://127.0.0.1:8300/healthz --mode server --timeout-seconds 60 \
+  --listener-host 127.0.0.1 --mcp-http-port 8200 --mcp-sse-port 8201
 ```
+
+Server mode stays closed until the sanitized `/healthz` service contract passes
+and TCP connections succeed to both loopback MCP listeners. The defaults are
+`127.0.0.1:8200` and `127.0.0.1:8201`; the explicit CLI overrides exist only
+for equivalent isolated test or non-default reviewed configurations.
 
 After all five providers are online, run team mode once. It reads sanitized
 `/healthz` state and allows the server-owned private canary to proceed; it does

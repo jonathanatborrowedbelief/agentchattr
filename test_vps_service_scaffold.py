@@ -6,6 +6,8 @@ import configparser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
+import socket
 import subprocess
 import sys
 import threading
@@ -128,6 +130,23 @@ def _health_server(body: bytes, status: int = 200):
         thread.join(timeout=1)
 
 
+@contextmanager
+def _tcp_endpoints(listening: tuple[bool, ...]):
+    sockets = []
+    try:
+        for accepts_connections in listening:
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            if accepts_connections:
+                listener.listen()
+            sockets.append(listener)
+        yield tuple(listener.getsockname()[1] for listener in sockets)
+    finally:
+        for listener in sockets:
+            listener.close()
+
+
 class WaitReadyCliTests(unittest.TestCase):
     def _run(
         self,
@@ -137,12 +156,12 @@ class WaitReadyCliTests(unittest.TestCase):
         status: int = 200,
         mode: str,
         timeout_seconds: str = "0.05",
+        listener_ports: tuple[int, ...] = (),
     ) -> tuple[subprocess.CompletedProcess[str], float]:
         body = raw_body if raw_body is not None else json.dumps(payload).encode()
         with _health_server(body, status=status) as url:
             started = time.monotonic()
-            result = subprocess.run(
-                [
+            command = [
                     sys.executable,
                     str(WAIT_READY),
                     "--url",
@@ -151,7 +170,13 @@ class WaitReadyCliTests(unittest.TestCase):
                     mode,
                     "--timeout-seconds",
                     timeout_seconds,
-                ],
+                ]
+            if listener_ports:
+                self.assertEqual(len(listener_ports), 2)
+                command.extend(("--mcp-http-port", str(listener_ports[0])))
+                command.extend(("--mcp-sse-port", str(listener_ports[1])))
+            result = subprocess.run(
+                command,
                 capture_output=True,
                 text=True,
                 timeout=2,
@@ -161,12 +186,32 @@ class WaitReadyCliTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         return result, elapsed
 
+    def test_server_mode_accepts_health_only_when_both_tcp_listeners_accept(self):
+        """Catch either required MCP listener being omitted from server readiness."""
+        with _tcp_endpoints((True, True)) as ports:
+            result, _ = self._run(
+                payload={"service": "agentchattr-team-up-v2", "ready": False},
+                mode="server",
+                listener_ports=ports,
+            )
+        self.assertEqual(result.returncode, 0)
+
+        with _tcp_endpoints((True, False)) as ports:
+            result, _ = self._run(
+                payload={"service": "agentchattr-team-up-v2", "ready": False},
+                mode="server",
+                listener_ports=ports,
+            )
+        self.assertNotEqual(result.returncode, 0)
+
     def test_server_mode_accepts_exact_service_before_team_ready(self):
         """Catch server ordering being coupled to provider/canary readiness."""
-        result, _ = self._run(
-            payload={"service": "agentchattr-team-up-v2", "ready": False},
-            mode="server",
-        )
+        with _tcp_endpoints((True, True)) as ports:
+            result, _ = self._run(
+                payload={"service": "agentchattr-team-up-v2", "ready": False},
+                mode="server",
+                listener_ports=ports,
+            )
         self.assertEqual(result.returncode, 0)
 
     def test_server_mode_rejects_the_wrong_service(self):
@@ -269,13 +314,43 @@ def _words(value: str) -> set[str]:
     return set(value.split())
 
 
+def _normalized_pins(requirements: tuple[str, ...]) -> dict[str, str]:
+    pins = {}
+    for requirement in requirements:
+        name, separator, version = requirement.partition("==")
+        if separator != "==":
+            raise AssertionError(f"requirement is not exactly pinned: {requirement}")
+        normalized_name = re.sub(r"[-_.]+", "-", name.partition("[")[0]).lower()
+        if normalized_name in pins:
+            raise AssertionError(f"duplicate requirement: {normalized_name}")
+        pins[normalized_name] = version
+    return pins
+
+
 class VpsToolchainLockTests(unittest.TestCase):
     def test_requirements_lock_matches_the_known_working_local_environment(self):
-        """Catch Python dependency drift from the separately tested VPS pins."""
+        """Catch Python dependency drift or an unhashed artifact entering the VPS lock."""
+        logical_lines = []
+        buffered = ""
+        for raw_line in VPS_REQUIREMENTS_LOCK.read_text("utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            buffered += line.removesuffix("\\").strip() + " "
+            if not line.endswith("\\"):
+                logical_lines.append(buffered.strip())
+                buffered = ""
+        self.assertEqual(buffered, "")
+        requirements = tuple(line.split()[0] for line in logical_lines)
         self.assertEqual(
-            tuple(VPS_REQUIREMENTS_LOCK.read_text("utf-8").splitlines()),
-            EXPECTED_REQUIREMENTS,
+            _normalized_pins(requirements),
+            _normalized_pins(EXPECTED_REQUIREMENTS),
         )
+        for requirement, line in zip(requirements, logical_lines, strict=True):
+            with self.subTest(requirement=requirement):
+                hashes = re.findall(r"--hash=sha256:([0-9a-f]{64})(?:\s|$)", line)
+                self.assertGreaterEqual(len(hashes), 1)
+                self.assertEqual(len(hashes), len(set(hashes)))
 
     def test_toolchain_lock_pins_node_and_every_provider_package_integrity(self):
         """Catch an unverified Node archive or provider package substitution."""
@@ -391,7 +466,8 @@ class VpsSystemdUnitTests(unittest.TestCase):
             service["ExecStartPre"],
             "/opt/agentchattr/current/.venv/bin/python "
             "/opt/agentchattr/current/deploy/vps/wait_ready.py "
-            "--url http://127.0.0.1:8300/healthz --mode server --timeout-seconds 60",
+            "--url http://127.0.0.1:8300/healthz --mode server --timeout-seconds 60 "
+            "--listener-host 127.0.0.1 --mcp-http-port 8200 --mcp-sse-port 8201",
         )
         self.assertEqual(
             service["ExecStart"],
@@ -577,7 +653,7 @@ class VpsConfigTemplateTests(unittest.TestCase):
             "full `git archive`",
             "chown -R root:root",
             "chmod -R go-w",
-            "Version-only Python pins are an outstanding blocker for `--require-hashes`.",
+            "--require-hashes",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, readme)
@@ -589,6 +665,13 @@ class VpsConfigTemplateTests(unittest.TestCase):
             "sudo -u agentchattr env PATH=/opt/agentchattr/toolchain/node/bin",
             readme,
         )
+        self.assertRegex(
+            readme,
+            r"\.venv/bin/(?:python -m pip|pip) install \\\n"
+            r"\s+--require-hashes \\\n"
+            r"\s+-r /opt/agentchattr/current/deploy/vps/requirements\.vps\.lock",
+        )
+        self.assertNotIn("Version-only Python pins are an outstanding blocker", readme)
 
     def test_gemini_credential_contract_is_path_only_and_secret_free(self):
         """Catch an embedded credential or credential source outside /etc."""

@@ -167,6 +167,14 @@ or persisted by the launcher.
   owned. The target and timer have no install section; worker/server restart
   bursts and conservative single-pilot caps are explicit. Provider login remains
   a human gate and Hermes credential reuse is forbidden.
+- The Python 3.12 environment is now fully SHA-256 hash locked at the same 36
+  known-working versions, and the operator install command enforces
+  `--require-hashes`. A clean Python 3.12 venv install and a CPython 3.12
+  manylinux2014 x86_64 foreign-platform install both accepted the lock.
+- VPS server readiness now requires the exact sanitized `/healthz` service
+  marker plus successful TCP connections to loopback ports 8200 and 8201.
+  Polling remains silent and bounded; the worker unit passes the listener
+  contract explicitly.
 - Strict scaffold TDD first failed on the missing readiness command, units, and
   configuration, then passed 20/20 focused tests. The related headless wrapper
   suite passed 3/3. Python compilation, TOML parsing for exactly five agents,
@@ -215,9 +223,9 @@ identity in the documented order with Hermes/resource checks; then validate the
 SSH tunnel, exact-five health, stop cleanup, rollback, and backup/restore plan.
 This scaffold alone is not evidence of VPS readiness.
 
-Before the first VPS write, replace the version-only Python requirements file
-with a hash-locked artifact set and use `pip --require-hashes`. Provider
-readiness redesign remains a separate, unstarted review item.
+The hash-lock and server-listener pre-deployment gates are closed locally.
+Provider readiness redesign remains a separate, unstarted review item, and the
+live VPS deployment still requires separate approval and host-side validation.
 
 Run harmless `video-lab` and `publish-queue` fixtures to prove the second
 waits for `team-up-shared-cast` and promotes after the first ends, and verify the
