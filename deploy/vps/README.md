@@ -77,9 +77,17 @@ sudo install -o root -g root -m 0644 \
   /opt/agentchattr/toolchain/npm/
 sudo env PATH=/opt/agentchattr/toolchain/node/bin:/usr/bin:/bin \
   /opt/agentchattr/toolchain/node/bin/npm ci --prefix /opt/agentchattr/toolchain/npm --omit=dev --ignore-scripts
+sudo env PATH=/opt/agentchattr/toolchain/node/bin:/usr/bin:/bin \
+  /opt/agentchattr/toolchain/node/bin/node \
+  /opt/agentchattr/toolchain/npm/node_modules/@anthropic-ai/claude-code/install.cjs
 sudo chown -R root:root /opt/agentchattr/current /opt/agentchattr/toolchain
 sudo chmod -R go-w /opt/agentchattr/current /opt/agentchattr/toolchain
 ```
+
+`npm ci` keeps all lifecycle scripts disabled. The one explicit Claude step is
+the reviewed package's platform selector: it copies the native executable from
+the already-installed locked optional package and performs no additional
+download. Run no other lifecycle script.
 
 The Python lock was generated mechanically from the known-working exact pins
 with pip-tools under Python 3.12. Every requirement includes SHA-256 artifact

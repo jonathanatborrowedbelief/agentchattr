@@ -640,6 +640,8 @@ class VpsConfigTemplateTests(unittest.TestCase):
             "toolchain.vps.lock.toml",
             "/opt/agentchattr/toolchain/npm/node_modules/.bin",
             "npm ci --omit=dev --ignore-scripts",
+            "node_modules/@anthropic-ai/claude-code/install.cjs",
+            "already-installed locked optional package",
             "Hermes credential reuse is forbidden",
             "human gate",
             "claude auth login",

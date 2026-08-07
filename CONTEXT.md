@@ -175,6 +175,10 @@ or persisted by the launcher.
   marker plus successful TCP connections to loopback ports 8200 and 8201.
   Polling remains silent and bounded; the worker unit passes the listener
   contract explicitly.
+- Ubuntu staging confirmed Claude Code's npm wrapper needs its reviewed
+  `install.cjs` platform-selection step after lifecycle-disabled `npm ci`; the
+  procedure now invokes only that script against the already locked optional
+  native package, then restores root ownership and non-writable permissions.
 - Strict scaffold TDD first failed on the missing readiness command, units, and
   configuration, then passed 20/20 focused tests. The related headless wrapper
   suite passed 3/3. Python compilation, TOML parsing for exactly five agents,
