@@ -907,6 +907,11 @@ def _run_main(cleanup: _RegistrationCleanup):
     parser = argparse.ArgumentParser(description="Agent wrapper with chat auto-trigger")
     parser.add_argument("agent", choices=agent_names, help=f"Agent to wrap ({', '.join(agent_names)})")
     parser.add_argument("--no-restart", action="store_true", help="Do not restart on exit")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Supervise tmux without attaching a terminal",
+    )
     parser.add_argument("--label", type=str, default=None, help="Custom display label")
     parser.add_argument("--cwd", type=str, default=None, help="Override the agent working directory")
     parser.add_argument("--role", type=str, default=None, help="Override the agent role")
@@ -1304,6 +1309,7 @@ def _run_main(cleanup: _RegistrationCleanup):
     )
     if sys.platform != "win32":
         run_kwargs["session_name"] = unix_session_name
+        run_kwargs["headless"] = args.headless
 
     try:
         run_agent(**run_kwargs)

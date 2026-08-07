@@ -1,0 +1,4 @@
+[Unit]
+Description=Exact five-provider agentchattr Team Up
+Wants=agentchattr-worker@claude-lead.service agentchattr-worker@gemini-video.service agentchattr-worker@codex-sol.service agentchattr-worker@codex-terra.service agentchattr-worker@codex-luna.service
+After=agentchattr-worker@claude-lead.service agentchattr-worker@gemini-video.service agentchattr-worker@codex-sol.service agentchattr-worker@codex-terra.service agentchattr-worker@codex-luna.service

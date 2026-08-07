@@ -1,0 +1,37 @@
+[Unit]
+Description=Isolated agentchattr worker %i
+Requires=agentchattr-server.service
+After=network-online.target agentchattr-server.service
+
+[Service]
+Type=simple
+User=agentchattr
+Group=agentchattr
+UMask=0077
+WorkingDirectory=/opt/agentchattr/current
+Environment=HOME=/var/lib/agentchattr/home/%i TMUX_TMPDIR=/run/agentchattr-%i
+RuntimeDirectory=agentchattr-%i
+RuntimeDirectoryMode=0700
+BindReadOnlyPaths=/etc/agentchattr/config.toml:/opt/agentchattr/current/config.toml
+ReadWritePaths=/var/lib/agentchattr /run/agentchattr-%i
+ExecStartPre=/opt/agentchattr/current/.venv/bin/python /opt/agentchattr/current/deploy/vps/wait_ready.py --url http://127.0.0.1:8300/healthz --mode server --timeout-seconds 60
+ExecStart=/opt/agentchattr/current/.venv/bin/python /opt/agentchattr/current/wrapper.py %i --headless --no-restart
+ExecStop=-/usr/bin/env TMUX_TMPDIR=/run/agentchattr-%i /usr/bin/tmux kill-session -t agentchattr-%i
+Restart=always
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=

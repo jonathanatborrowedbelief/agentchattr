@@ -1,0 +1,23 @@
+[Unit]
+Description=Verify isolated agentchattr Team Up readiness
+After=agentchattr-server.service
+
+[Service]
+Type=oneshot
+User=agentchattr
+Group=agentchattr
+ExecStart=/opt/agentchattr/current/.venv/bin/python /opt/agentchattr/current/deploy/vps/wait_ready.py --url http://127.0.0.1:8300/healthz --mode team --timeout-seconds 30
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
