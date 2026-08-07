@@ -6,7 +6,7 @@ data_dir = "/var/lib/agentchattr/data"
 [agents.claude-lead]
 provider = "claude"
 dedicated_identity = true
-command = "/usr/local/bin/claude"
+command = "/opt/agentchattr/toolchain/npm/node_modules/.bin/claude"
 cwd = "/var/lib/agentchattr/worktrees/claude-lead"
 label = "Claude Lead"
 role = "Lead"
@@ -18,7 +18,7 @@ inject_delay = 1.0
 [agents.gemini-video]
 provider = "gemini"
 dedicated_identity = true
-command = "/usr/local/bin/gemini"
+command = "/opt/agentchattr/toolchain/npm/node_modules/.bin/gemini"
 cwd = "/var/lib/agentchattr/worktrees/gemini-video"
 label = "Gemini Video"
 role = "Video"
@@ -30,7 +30,7 @@ env_keys = ["GEMINI_API_KEY"]
 [agents.codex-sol]
 provider = "codex"
 dedicated_identity = true
-command = "/usr/local/bin/codex"
+command = "/opt/agentchattr/toolchain/npm/node_modules/.bin/codex"
 cwd = "/var/lib/agentchattr/worktrees/codex-sol"
 label = "Codex Sol"
 role = "Integrator"
@@ -41,7 +41,7 @@ inject_delay = 1.0
 [agents.codex-terra]
 provider = "codex"
 dedicated_identity = true
-command = "/usr/local/bin/codex"
+command = "/opt/agentchattr/toolchain/npm/node_modules/.bin/codex"
 cwd = "/var/lib/agentchattr/worktrees/codex-terra"
 label = "Codex Terra"
 role = "Builder"
@@ -52,7 +52,7 @@ inject_delay = 1.0
 [agents.codex-luna]
 provider = "codex"
 dedicated_identity = true
-command = "/usr/local/bin/codex"
+command = "/opt/agentchattr/toolchain/npm/node_modules/.bin/codex"
 cwd = "/var/lib/agentchattr/worktrees/codex-luna"
 label = "Codex Luna"
 role = "Scout"

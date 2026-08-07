@@ -1,0 +1,13 @@
+{
+  "name": "agentchattr-vps-toolchain",
+  "private": true,
+  "engines": {
+    "node": "22.22.3"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.224",
+    "@google/gemini-cli": "0.53.1",
+    "@openai/codex": "0.146.0",
+    "npm": "10.9.8"
+  }
+}

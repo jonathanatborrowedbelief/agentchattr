@@ -25,6 +25,57 @@ EXPECTED_IDENTITIES = {
 }
 SYSTEMD_DIR = ROOT / "deploy" / "vps" / "systemd"
 VPS_CONFIG = ROOT / "deploy" / "vps" / "config.vps.toml.example"
+VPS_REQUIREMENTS_LOCK = ROOT / "deploy" / "vps" / "requirements.vps.lock"
+VPS_TOOLCHAIN_LOCK = ROOT / "deploy" / "vps" / "toolchain.vps.lock.toml"
+NPM_TOOLCHAIN_DIR = ROOT / "deploy" / "vps" / "npm-toolchain"
+NPM_TOOLCHAIN_PACKAGE = NPM_TOOLCHAIN_DIR / "package.json"
+NPM_TOOLCHAIN_LOCK = NPM_TOOLCHAIN_DIR / "package-lock.json"
+TOOLCHAIN_NODE_BIN = "/opt/agentchattr/toolchain/node/bin"
+TOOLCHAIN_NPM_BIN = "/opt/agentchattr/toolchain/npm/node_modules/.bin"
+EXPECTED_NPM_DEPENDENCIES = {
+    "@anthropic-ai/claude-code": "2.1.224",
+    "@google/gemini-cli": "0.53.1",
+    "@openai/codex": "0.146.0",
+    "npm": "10.9.8",
+}
+EXPECTED_REQUIREMENTS = (
+    "annotated-doc==0.0.4",
+    "annotated-types==0.8.0",
+    "anyio==4.14.2",
+    "attrs==26.1.0",
+    "certifi==2026.7.22",
+    "cffi==2.1.0",
+    "click==8.4.2",
+    "cryptography==49.0.0",
+    "fastapi==0.139.2",
+    "h11==0.16.0",
+    "httpcore==1.0.9",
+    "httptools==0.8.0",
+    "httpx==0.28.1",
+    "httpx-sse==0.4.3",
+    "idna==3.18",
+    "jsonschema==4.26.0",
+    "jsonschema-specifications==2025.9.1",
+    "mcp==1.28.1",
+    "pycparser==3.0",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.14.2",
+    "pydantic_core==2.46.4",
+    "PyJWT==2.13.0",
+    "python-dotenv==1.2.2",
+    "python-multipart==0.0.32",
+    "PyYAML==6.0.3",
+    "referencing==0.37.0",
+    "rpds-py==2026.6.3",
+    "sse-starlette==3.4.6",
+    "starlette==1.3.1",
+    "typing-inspection==0.4.2",
+    "typing_extensions==4.16.0",
+    "uvicorn==0.51.0",
+    "uvloop==0.22.1",
+    "watchfiles==1.2.0",
+    "websockets==16.1.1",
+)
 
 
 def _team_health() -> dict:
@@ -218,10 +269,90 @@ def _words(value: str) -> set[str]:
     return set(value.split())
 
 
+class VpsToolchainLockTests(unittest.TestCase):
+    def test_requirements_lock_matches_the_known_working_local_environment(self):
+        """Catch Python dependency drift from the separately tested VPS pins."""
+        self.assertEqual(
+            tuple(VPS_REQUIREMENTS_LOCK.read_text("utf-8").splitlines()),
+            EXPECTED_REQUIREMENTS,
+        )
+
+    def test_toolchain_lock_pins_node_and_every_provider_package_integrity(self):
+        """Catch an unverified Node archive or provider package substitution."""
+        with VPS_TOOLCHAIN_LOCK.open("rb") as stream:
+            lock = tomllib.load(stream)
+
+        self.assertEqual(
+            lock["node"],
+            {
+                "version": "22.22.3",
+                "platform": "linux-x64",
+                "url": "https://nodejs.org/dist/v22.22.3/"
+                "node-v22.22.3-linux-x64.tar.xz",
+                "sha256": "2e5d13569282d016861fae7c8f935e741693c269101a5bebcf761a5376d1f99f",
+            },
+        )
+        self.assertEqual(
+            lock["npm"],
+            {
+                "version": "10.9.8",
+                "tarball": "https://registry.npmjs.org/npm/-/npm-10.9.8.tgz",
+                "integrity": "sha512-fYwb6ODSmHkqrJQQaCxY3M2lPf/mpgC7ik0HSzzIwG5CGtabRp4bNqikatvCoT42"
+                "b5INQSqudVH0R7yVmC9hVg==",
+                "prefix": "/opt/agentchattr/toolchain/npm",
+                "bin_dir": TOOLCHAIN_NPM_BIN,
+            },
+        )
+        self.assertEqual(
+            lock["package"],
+            [
+                {
+                    "name": "@anthropic-ai/claude-code",
+                    "version": "2.1.224",
+                    "integrity": "sha512-qvc2GFWIe3KrTgzx9hkOjHznpp6kmYSOC6o6F/"
+                    "62u1lPPDtSrd+l6ZKYQ47idBmT/2eb/xQ/IoiP8zJBlpt53A==",
+                },
+                {
+                    "name": "@openai/codex",
+                    "version": "0.146.0",
+                    "integrity": "sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/"
+                    "JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==",
+                },
+                {
+                    "name": "@google/gemini-cli",
+                    "version": "0.53.1",
+                    "integrity": "sha512-xBGdD/tl05gsTpD2oV1Bq0NCb4BBeTnjSbKxHtwOB7nt1QMaqWYJ9WsOE"
+                    "sQQhQ2P1v0UJth1F17SAXvdZ5mASw==",
+                },
+            ],
+        )
+
+    def test_npm_toolchain_manifest_and_lock_pin_root_dependency_versions(self):
+        """Catch a transitive dependency lock being omitted or root versions drifting."""
+        package = json.loads(NPM_TOOLCHAIN_PACKAGE.read_text("utf-8"))
+        lock = json.loads(NPM_TOOLCHAIN_LOCK.read_text("utf-8"))
+        self.assertEqual(package["private"], True)
+        self.assertEqual(package["engines"], {"node": "22.22.3"})
+        self.assertEqual(package["dependencies"], EXPECTED_NPM_DEPENDENCIES)
+        self.assertEqual(lock["lockfileVersion"], 3)
+        self.assertEqual(lock["packages"][""]["dependencies"], EXPECTED_NPM_DEPENDENCIES)
+        for package_name, version in EXPECTED_NPM_DEPENDENCIES.items():
+            with self.subTest(package=package_name):
+                self.assertEqual(
+                    lock["packages"][f"node_modules/{package_name}"]["version"],
+                    version,
+                )
+                self.assertIn(
+                    "integrity",
+                    lock["packages"][f"node_modules/{package_name}"],
+                )
+
+
 class VpsSystemdUnitTests(unittest.TestCase):
     def test_server_unit_uses_fixed_runtime_and_bounded_privileges(self):
         """Catch server execution as the wrong user/path or with broad writes."""
-        service = _unit("agentchattr-server.service")["Service"]
+        unit = _unit("agentchattr-server.service")
+        service = unit["Service"]
         self.assertEqual(
             service["ExecStart"],
             "/opt/agentchattr/current/.venv/bin/python /opt/agentchattr/current/run.py",
@@ -231,6 +362,13 @@ class VpsSystemdUnitTests(unittest.TestCase):
         self.assertEqual(service["Group"], "agentchattr")
         self.assertEqual(service["UMask"], "0077")
         self.assertEqual(service["Restart"], "on-failure")
+        self.assertEqual(unit["Unit"]["StartLimitIntervalSec"], "300")
+        self.assertEqual(unit["Unit"]["StartLimitBurst"], "5")
+        self.assertEqual(service["MemoryHigh"], "512M")
+        self.assertEqual(service["MemoryMax"], "768M")
+        self.assertEqual(service["CPUQuota"], "100%")
+        self.assertEqual(service["TasksMax"], "256")
+        self.assertEqual(service["LimitNOFILE"], "8192")
         self.assertEqual(service["NoNewPrivileges"], "true")
         self.assertEqual(service["PrivateTmp"], "true")
         self.assertEqual(service["ProtectSystem"], "strict")
@@ -262,6 +400,13 @@ class VpsSystemdUnitTests(unittest.TestCase):
         )
         self.assertEqual(service["Restart"], "always")
         self.assertEqual(service["RestartSec"], "5")
+        self.assertEqual(dependencies["StartLimitIntervalSec"], "300")
+        self.assertEqual(dependencies["StartLimitBurst"], "5")
+        self.assertEqual(service["MemoryHigh"], "1024M")
+        self.assertEqual(service["MemoryMax"], "1536M")
+        self.assertEqual(service["CPUQuota"], "150%")
+        self.assertEqual(service["TasksMax"], "512")
+        self.assertEqual(service["LimitNOFILE"], "8192")
 
     def test_worker_isolates_home_tmux_runtime_and_stop_cleanup(self):
         """Catch providers sharing CLI state/socket paths or surviving stop."""
@@ -269,6 +414,8 @@ class VpsSystemdUnitTests(unittest.TestCase):
         environment = _words(service["Environment"])
         self.assertEqual(environment, {
             "HOME=/var/lib/agentchattr/home/%i",
+            f"PATH={TOOLCHAIN_NPM_BIN}:{TOOLCHAIN_NODE_BIN}:/usr/bin:/bin",
+            "SHELL=/bin/bash",
             "TMUX_TMPDIR=/run/agentchattr-%i",
         })
         self.assertEqual(service["RuntimeDirectory"], "agentchattr-%i")
@@ -316,7 +463,8 @@ class VpsSystemdUnitTests(unittest.TestCase):
     def test_health_timer_runs_only_provider_aware_team_readiness_each_minute(self):
         """Catch the timer sending messages, retrying canaries, or using weak health."""
         health = _unit("agentchattr-health.service")["Service"]
-        timer = _unit("agentchattr-health.timer")["Timer"]
+        timer_unit = _unit("agentchattr-health.timer")
+        timer = timer_unit["Timer"]
         self.assertEqual(health["Type"], "oneshot")
         self.assertEqual(health["User"], "agentchattr")
         self.assertEqual(
@@ -328,6 +476,7 @@ class VpsSystemdUnitTests(unittest.TestCase):
         self.assertEqual(timer["OnUnitActiveSec"], "1min")
         self.assertEqual(timer["Unit"], "agentchattr-health.service")
         self.assertNotIn("ExecStart", timer)
+        self.assertNotIn("Install", timer_unit)
 
 
 class VpsConfigTemplateTests(unittest.TestCase):
@@ -390,6 +539,56 @@ class VpsConfigTemplateTests(unittest.TestCase):
                     model,
                 )
                 self.assertTrue(forbidden.isdisjoint(launch_args))
+
+    def test_config_uses_only_the_pinned_isolated_provider_commands(self):
+        """Catch provider commands drifting back to shared /usr/local/bin tools."""
+        agents = self._config()["agents"]
+        expected_commands = {
+            "claude-lead": f"{TOOLCHAIN_NPM_BIN}/claude",
+            "gemini-video": f"{TOOLCHAIN_NPM_BIN}/gemini",
+            "codex-sol": f"{TOOLCHAIN_NPM_BIN}/codex",
+            "codex-terra": f"{TOOLCHAIN_NPM_BIN}/codex",
+            "codex-luna": f"{TOOLCHAIN_NPM_BIN}/codex",
+        }
+        self.assertEqual(
+            {identity: agent["command"] for identity, agent in agents.items()},
+            expected_commands,
+        )
+        self.assertNotIn("/usr/local/bin", VPS_CONFIG.read_text("utf-8"))
+
+    def test_readme_requires_isolated_pinned_install_and_human_provider_login(self):
+        """Catch install/auth guidance that reuses Hermes credentials or automates login."""
+        readme = (ROOT / "deploy" / "vps" / "README.md").read_text("utf-8")
+        for required in (
+            "requirements.vps.lock",
+            "toolchain.vps.lock.toml",
+            "/opt/agentchattr/toolchain/npm/node_modules/.bin",
+            "npm ci --omit=dev --ignore-scripts",
+            "Hermes credential reuse is forbidden",
+            "human gate",
+            "claude auth login",
+            "claude auth status",
+            "codex login",
+            "codex login status",
+            "gemini --version",
+            "agentchattr:agentchattr 0600",
+            "root:agentchattr 0750",
+            "build_release.py must not be used for VPS",
+            "full `git archive`",
+            "chown -R root:root",
+            "chmod -R go-w",
+            "Version-only Python pins are an outstanding blocker for `--require-hashes`.",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, readme)
+        self.assertNotIn(
+            "sudo -u agentchattr /opt/agentchattr/current/.venv/bin/pip install",
+            readme,
+        )
+        self.assertNotIn(
+            "sudo -u agentchattr env PATH=/opt/agentchattr/toolchain/node/bin",
+            readme,
+        )
 
     def test_gemini_credential_contract_is_path_only_and_secret_free(self):
         """Catch an embedded credential or credential source outside /etc."""

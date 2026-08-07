@@ -2,6 +2,8 @@
 Description=Isolated agentchattr worker %i
 Requires=agentchattr-server.service
 After=network-online.target agentchattr-server.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -9,7 +11,7 @@ User=agentchattr
 Group=agentchattr
 UMask=0077
 WorkingDirectory=/opt/agentchattr/current
-Environment=HOME=/var/lib/agentchattr/home/%i TMUX_TMPDIR=/run/agentchattr-%i
+Environment=HOME=/var/lib/agentchattr/home/%i TMUX_TMPDIR=/run/agentchattr-%i SHELL=/bin/bash PATH=/opt/agentchattr/toolchain/npm/node_modules/.bin:/opt/agentchattr/toolchain/node/bin:/usr/bin:/bin
 RuntimeDirectory=agentchattr-%i
 RuntimeDirectoryMode=0700
 BindReadOnlyPaths=/etc/agentchattr/config.toml:/opt/agentchattr/current/config.toml
@@ -19,6 +21,11 @@ ExecStart=/opt/agentchattr/current/.venv/bin/python /opt/agentchattr/current/wra
 ExecStop=-/usr/bin/env TMUX_TMPDIR=/run/agentchattr-%i /usr/bin/tmux kill-session -t agentchattr-%i
 Restart=always
 RestartSec=5
+MemoryHigh=1024M
+MemoryMax=1536M
+CPUQuota=150%
+TasksMax=512
+LimitNOFILE=8192
 KillMode=control-group
 TimeoutStopSec=30
 NoNewPrivileges=true

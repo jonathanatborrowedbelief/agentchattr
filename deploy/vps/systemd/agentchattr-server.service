@@ -2,6 +2,8 @@
 Description=Isolated agentchattr Team Up server
 Wants=network-online.target
 After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -12,6 +14,11 @@ WorkingDirectory=/opt/agentchattr/current
 ExecStart=/opt/agentchattr/current/.venv/bin/python /opt/agentchattr/current/run.py
 Restart=on-failure
 RestartSec=5
+MemoryHigh=512M
+MemoryMax=768M
+CPUQuota=100%
+TasksMax=256
+LimitNOFILE=8192
 StateDirectory=agentchattr
 StateDirectoryMode=0700
 BindReadOnlyPaths=/etc/agentchattr/config.toml:/opt/agentchattr/current/config.toml

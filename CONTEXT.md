@@ -160,6 +160,13 @@ or persisted by the launcher.
   bounded `wait_ready.py`; hardened server, per-identity worker, exact-five
   target, and minute health units; a loopback-only exact-role TOML example; and
   a staged operator README. No installation or remote action was performed.
+- A follow-up local-only toolchain pass pins the exact Python environment, Node
+  22.22.3/npm 10.9.8 metadata, provider packages, and npm transitives. Provider
+  commands and worker PATH use only `/opt/agentchattr/toolchain`; release and
+  toolchain staging remain root-owned, while role homes/worktrees stay service-
+  owned. The target and timer have no install section; worker/server restart
+  bursts and conservative single-pilot caps are explicit. Provider login remains
+  a human gate and Hermes credential reuse is forbidden.
 - Strict scaffold TDD first failed on the missing readiness command, units, and
   configuration, then passed 20/20 focused tests. The related headless wrapper
   suite passed 3/3. Python compilation, TOML parsing for exactly five agents,
@@ -207,6 +214,10 @@ credential file; install one reviewed release/config; activate server and each
 identity in the documented order with Hermes/resource checks; then validate the
 SSH tunnel, exact-five health, stop cleanup, rollback, and backup/restore plan.
 This scaffold alone is not evidence of VPS readiness.
+
+Before the first VPS write, replace the version-only Python requirements file
+with a hash-locked artifact set and use `pip --require-hashes`. Provider
+readiness redesign remains a separate, unstarted review item.
 
 Run harmless `video-lab` and `publish-queue` fixtures to prove the second
 waits for `team-up-shared-cast` and promotes after the first ends, and verify the
