@@ -1320,12 +1320,33 @@ def _run_main(cleanup: _RegistrationCleanup):
     print("  Wrapper stopped.")
 
 
+def _exit_cleanly_on_sigterm(_signum, _frame):
+    raise SystemExit(0)
+
+
 def main():
     cleanup = _RegistrationCleanup()
+    signal_module = None
+    previous_sigterm_handler = None
+    if sys.platform != "win32" and "--headless" in sys.argv[1:]:
+        import signal
+
+        signal_module = signal
+        previous_sigterm_handler = signal.signal(
+            signal.SIGTERM,
+            _exit_cleanly_on_sigterm,
+        )
     try:
         return _run_main(cleanup)
     finally:
-        cleanup.run()
+        try:
+            cleanup.run()
+        finally:
+            if signal_module is not None:
+                signal_module.signal(
+                    signal_module.SIGTERM,
+                    previous_sigterm_handler,
+                )
 
 
 if __name__ == "__main__":

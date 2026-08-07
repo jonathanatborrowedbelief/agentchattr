@@ -3,8 +3,14 @@
 from contextlib import ExitStack
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+import json
+import os
+import signal
+import subprocess
 import sys
 import tempfile
+import textwrap
+import time
 import unittest
 from unittest import mock
 
@@ -160,6 +166,89 @@ class HeadlessWrapperCliTests(unittest.TestCase):
         windows_kwargs = self._run_cli("win32", windows_run_agent)
         self.assertNotIn("headless", windows_kwargs)
         self.assertNotIn("--headless", windows_kwargs["extra_args"])
+
+
+@unittest.skipIf(sys.platform == "win32", "SIGTERM is a Unix process contract")
+class HeadlessWrapperSignalTests(unittest.TestCase):
+    def test_sigterm_unwinds_main_and_deregisters_authenticated_identity_once(self):
+        """Catch SIGTERM bypassing main's authenticated registration cleanup."""
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            temporary_path = Path(temporary_dir)
+            ready_marker = temporary_path / "ready"
+            cleanup_marker = temporary_path / "cleanup.jsonl"
+            environment = os.environ.copy()
+            environment.update({
+                "WRAPPER_TEST_READY": str(ready_marker),
+                "WRAPPER_TEST_CLEANUP": str(cleanup_marker),
+            })
+            child_code = textwrap.dedent(
+                """
+                import json
+                import os
+                from pathlib import Path
+                import signal
+                import sys
+
+                import wrapper
+
+                def fake_run_main(cleanup):
+                    cleanup.install(8317, "sigterm-test", "authenticated-test-token")
+                    Path(os.environ["WRAPPER_TEST_READY"]).write_text("ready", "utf-8")
+                    signal.pause()
+                    raise AssertionError("SIGTERM did not exit the wrapper")
+
+                def fake_deregister(server_port, name, token):
+                    payload = {"server_port": server_port, "name": name, "token": token}
+                    with Path(os.environ["WRAPPER_TEST_CLEANUP"]).open("a", encoding="utf-8") as stream:
+                        stream.write(json.dumps(payload) + "\\n")
+
+                wrapper._run_main = fake_run_main
+                wrapper._deregister_instance = fake_deregister
+                sys.argv = ["wrapper.py", "sigterm-test", "--headless", "--no-restart"]
+                wrapper.main()
+                """
+            )
+            process = subprocess.Popen(
+                [sys.executable, "-c", child_code],
+                cwd=Path(wrapper.__file__).parent,
+                env=environment,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            try:
+                deadline = time.monotonic() + 5
+                while not ready_marker.exists():
+                    returncode = process.poll()
+                    if returncode is not None:
+                        self.fail(f"wrapper exited before SIGTERM with {returncode}")
+                    if time.monotonic() >= deadline:
+                        self.fail("wrapper did not signal readiness before SIGTERM")
+                    time.sleep(0.01)
+
+                os.kill(process.pid, signal.SIGTERM)
+                returncode = process.wait(timeout=5)
+
+                cleanup_records = [
+                    json.loads(line)
+                    for line in (
+                        cleanup_marker.read_text("utf-8").splitlines()
+                        if cleanup_marker.exists()
+                        else []
+                    )
+                ]
+                self.assertEqual(
+                    (returncode, cleanup_records),
+                    (0, [{
+                        "server_port": 8317,
+                        "name": "sigterm-test",
+                        "token": "authenticated-test-token",
+                    }]),
+                )
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
 
 
 if __name__ == "__main__":
