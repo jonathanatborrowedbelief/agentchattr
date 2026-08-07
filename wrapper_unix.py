@@ -218,6 +218,7 @@ def run_agent(
     provider: str | None = None,
     report_provider_state=None,
     readiness_poll_interval: float = 1,
+    headless: bool = False,
 ):
     """Run agent inside a tmux session, inject via tmux send-keys."""
     _check_tmux()
@@ -262,8 +263,9 @@ def run_agent(
             watcher_started = True
 
     print(f"  Using tmux session: {session_name}")
-    print(f"  Detach: Ctrl+B, D  (agent keeps running)")
-    print(f"  Reattach: tmux attach -t {session_name}\n")
+    if not headless:
+        print(f"  Detach: Ctrl+B, D  (agent keeps running)")
+        print(f"  Reattach: tmux attach -t {session_name}\n")
 
     while True:
         try:
@@ -306,14 +308,16 @@ def run_agent(
                 ).start()
 
             # Attach — blocks until agent exits or user detaches (Ctrl+B, D)
-            subprocess.run(["tmux", "attach-session", "-t", session_name])
+            if not headless:
+                subprocess.run(["tmux", "attach-session", "-t", session_name])
 
             # Check: did the agent exit, or did the user just detach?
             if _session_exists(session_name):
                 # Session still alive — user detached, agent running in background.
                 # Keep the wrapper alive so the local proxy and heartbeats survive.
-                print(f"\n  Detached. {agent.capitalize()} still running in tmux.")
-                print(f"  Reattach: tmux attach -t {session_name}")
+                if not headless:
+                    print(f"\n  Detached. {agent.capitalize()} still running in tmux.")
+                    print(f"  Reattach: tmux attach -t {session_name}")
                 while _session_exists(session_name):
                     time.sleep(1)
 

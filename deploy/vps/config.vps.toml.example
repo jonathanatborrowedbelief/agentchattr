@@ -1,0 +1,73 @@
+[server]
+host = "127.0.0.1"
+port = 8300
+data_dir = "/var/lib/agentchattr/data"
+
+[agents.claude-lead]
+provider = "claude"
+dedicated_identity = true
+command = "/opt/agentchattr/toolchain/npm/node_modules/.bin/claude"
+cwd = "/var/lib/agentchattr/worktrees/claude-lead"
+label = "Claude Lead"
+role = "Lead"
+launch_args = ["--model", "opus", "--effort", "high"]
+mcp_merge_project = false
+instructions_file = "Claude.md"
+inject_delay = 1.0
+
+[agents.gemini-video]
+provider = "gemini"
+dedicated_identity = true
+command = "/opt/agentchattr/toolchain/npm/node_modules/.bin/gemini"
+cwd = "/var/lib/agentchattr/worktrees/gemini-video"
+label = "Gemini Video"
+role = "Video"
+launch_args = ["--model", "gemini-3.1-flash-lite"]
+instructions_file = "Gemini.md"
+env_file = "/etc/agentchattr/secrets/gemini-video.env"
+env_keys = ["GEMINI_API_KEY"]
+
+[agents.codex-sol]
+provider = "codex"
+dedicated_identity = true
+command = "/opt/agentchattr/toolchain/npm/node_modules/.bin/codex"
+cwd = "/var/lib/agentchattr/worktrees/codex-sol"
+label = "Codex Sol"
+role = "Integrator"
+launch_args = ["--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=high"]
+instructions_file = "Codex.md"
+inject_delay = 1.0
+
+[agents.codex-terra]
+provider = "codex"
+dedicated_identity = true
+command = "/opt/agentchattr/toolchain/npm/node_modules/.bin/codex"
+cwd = "/var/lib/agentchattr/worktrees/codex-terra"
+label = "Codex Terra"
+role = "Builder"
+launch_args = ["--model", "gpt-5.6-terra", "-c", "model_reasoning_effort=high"]
+instructions_file = "Codex.md"
+inject_delay = 1.0
+
+[agents.codex-luna]
+provider = "codex"
+dedicated_identity = true
+command = "/opt/agentchattr/toolchain/npm/node_modules/.bin/codex"
+cwd = "/var/lib/agentchattr/worktrees/codex-luna"
+label = "Codex Luna"
+role = "Scout"
+launch_args = ["--model", "gpt-5.6-luna", "-c", "model_reasoning_effort=medium"]
+instructions_file = "Codex.md"
+inject_delay = 1.0
+
+[routing]
+default = "none"
+max_agent_hops = 12
+
+[mcp]
+http_port = 8200
+sse_port = 8201
+
+[images]
+upload_dir = "/var/lib/agentchattr/uploads"
+max_size_mb = 10

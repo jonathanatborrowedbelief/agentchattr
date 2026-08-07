@@ -907,6 +907,11 @@ def _run_main(cleanup: _RegistrationCleanup):
     parser = argparse.ArgumentParser(description="Agent wrapper with chat auto-trigger")
     parser.add_argument("agent", choices=agent_names, help=f"Agent to wrap ({', '.join(agent_names)})")
     parser.add_argument("--no-restart", action="store_true", help="Do not restart on exit")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Supervise tmux without attaching a terminal",
+    )
     parser.add_argument("--label", type=str, default=None, help="Custom display label")
     parser.add_argument("--cwd", type=str, default=None, help="Override the agent working directory")
     parser.add_argument("--role", type=str, default=None, help="Override the agent role")
@@ -1304,6 +1309,7 @@ def _run_main(cleanup: _RegistrationCleanup):
     )
     if sys.platform != "win32":
         run_kwargs["session_name"] = unix_session_name
+        run_kwargs["headless"] = args.headless
 
     try:
         run_agent(**run_kwargs)
@@ -1314,12 +1320,33 @@ def _run_main(cleanup: _RegistrationCleanup):
     print("  Wrapper stopped.")
 
 
+def _exit_cleanly_on_sigterm(_signum, _frame):
+    raise SystemExit(0)
+
+
 def main():
     cleanup = _RegistrationCleanup()
+    signal_module = None
+    previous_sigterm_handler = None
+    if sys.platform != "win32" and "--headless" in sys.argv[1:]:
+        import signal
+
+        signal_module = signal
+        previous_sigterm_handler = signal.signal(
+            signal.SIGTERM,
+            _exit_cleanly_on_sigterm,
+        )
     try:
         return _run_main(cleanup)
     finally:
-        cleanup.run()
+        try:
+            cleanup.run()
+        finally:
+            if signal_module is not None:
+                signal_module.signal(
+                    signal_module.SIGTERM,
+                    previous_sigterm_handler,
+                )
 
 
 if __name__ == "__main__":

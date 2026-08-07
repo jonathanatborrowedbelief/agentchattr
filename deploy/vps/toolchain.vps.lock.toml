@@ -1,0 +1,27 @@
+[node]
+version = "22.22.3"
+platform = "linux-x64"
+url = "https://nodejs.org/dist/v22.22.3/node-v22.22.3-linux-x64.tar.xz"
+sha256 = "2e5d13569282d016861fae7c8f935e741693c269101a5bebcf761a5376d1f99f"
+
+[npm]
+version = "10.9.8"
+tarball = "https://registry.npmjs.org/npm/-/npm-10.9.8.tgz"
+integrity = "sha512-fYwb6ODSmHkqrJQQaCxY3M2lPf/mpgC7ik0HSzzIwG5CGtabRp4bNqikatvCoT42b5INQSqudVH0R7yVmC9hVg=="
+prefix = "/opt/agentchattr/toolchain/npm"
+bin_dir = "/opt/agentchattr/toolchain/npm/node_modules/.bin"
+
+[[package]]
+name = "@anthropic-ai/claude-code"
+version = "2.1.224"
+integrity = "sha512-qvc2GFWIe3KrTgzx9hkOjHznpp6kmYSOC6o6F/62u1lPPDtSrd+l6ZKYQ47idBmT/2eb/xQ/IoiP8zJBlpt53A=="
+
+[[package]]
+name = "@openai/codex"
+version = "0.146.0"
+integrity = "sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw=="
+
+[[package]]
+name = "@google/gemini-cli"
+version = "0.53.1"
+integrity = "sha512-xBGdD/tl05gsTpD2oV1Bq0NCb4BBeTnjSbKxHtwOB7nt1QMaqWYJ9WsOEsQQhQ2P1v0UJth1F17SAXvdZ5mASw=="

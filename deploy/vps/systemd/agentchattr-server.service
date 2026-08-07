@@ -1,0 +1,42 @@
+[Unit]
+Description=Isolated agentchattr Team Up server
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=agentchattr
+Group=agentchattr
+UMask=0077
+WorkingDirectory=/opt/agentchattr/current
+ExecStart=/opt/agentchattr/current/.venv/bin/python /opt/agentchattr/current/run.py
+Restart=on-failure
+RestartSec=5
+MemoryHigh=512M
+MemoryMax=768M
+CPUQuota=100%
+TasksMax=256
+LimitNOFILE=8192
+StateDirectory=agentchattr
+StateDirectoryMode=0700
+BindReadOnlyPaths=/etc/agentchattr/config.toml:/opt/agentchattr/current/config.toml
+ReadWritePaths=/var/lib/agentchattr
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target
